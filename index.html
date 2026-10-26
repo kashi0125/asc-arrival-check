@@ -4,6 +4,14 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <title>大阪発 到着日チェック</title>
+<link rel="manifest" href="manifest.webmanifest">
+<meta name="theme-color" content="#0A6C8F">
+<link rel="icon" href="icon-192.png">
+<link rel="apple-touch-icon" href="apple-touch-icon.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="到着日チェック">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=BIZ+UDPGothic:wght@400;700&family=JetBrains+Mono:wght@500;700&display=swap">
 <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js"></script>
@@ -81,6 +89,12 @@ details pre{white-space:pre-wrap;word-break:break-all;background:var(--bg);paddi
 .prefs button{font:inherit;background:none;border:0;color:var(--ink);padding:0;cursor:pointer;text-decoration:underline;text-decoration-color:var(--line);text-underline-offset:3px}
 .prefs .x{font-size:12px;color:var(--warn);width:100%}
 .foot{font-size:12px;color:var(--muted)}
+.head{display:flex;flex-wrap:wrap;gap:10px 12px;align-items:flex-start;justify-content:space-between}
+.head > div{min-width:0}
+.install{display:inline-flex;align-items:center;gap:6px;flex:none;font-weight:700;border-color:var(--accent);color:var(--accent)}
+.install svg{width:16px;height:16px}
+.howto{background:var(--accent-soft);border-radius:12px;padding:12px 14px;font-size:14px;display:flex;flex-direction:column;gap:10px;align-items:flex-start}
+.howto ol{margin:0;padding-left:1.4em}
 .formwrap{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:14px 12px;overflow-x:auto;display:flex;flex-direction:column;gap:14px}
 .form{display:grid;grid-template-columns:repeat(3,minmax(84px,1fr));gap:12px;align-items:start;min-width:270px}
 .fcol{display:flex;flex-direction:column;gap:10px}
@@ -102,10 +116,20 @@ details pre{white-space:pre-wrap;word-break:break-all;background:var(--bg);paddi
 </head>
 <body>
 <div class="wrap">
-  <header>
-    <h1>大阪発 到着日チェック</h1>
-    <p class="sub">荷札を撮ると、届け先から到着日を出します（発送日＝1日目）</p>
+  <header class="head">
+    <div>
+      <h1>大阪発 到着日チェック</h1>
+      <p class="sub">荷札を撮ると、届け先から到着日を出します（発送日＝1日目）</p>
+    </div>
+    <button class="chip install" id="installBtn" type="button" hidden>
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 4v11"/><path d="M7 10l5 5 5-5"/><path d="M5 20h14"/></svg>
+      ホーム画面に追加
+    </button>
   </header>
+  <div class="howto" id="howto" hidden>
+    <div id="howtoText"></div>
+    <button class="chip" id="howtoClose" type="button">閉じる</button>
+  </div>
 
   <div class="row">
     <label class="cap" for="shipDate">発送日</label>
@@ -514,6 +538,31 @@ $("form").addEventListener("click", pickPref);
 renderForm();
 ["camInput","fileInput"].forEach(id => $(id).addEventListener("change", e => { handleFile(e.target.files[0]); e.target.value = ""; }));
 renderSheet(); renderAnswer();
+// ===== ホーム画面に追加 =====
+const isStandalone = () => window.matchMedia("(display-mode: standalone)").matches || navigator.standalone === true;
+const isIOS = /iPhone|iPad|iPod/.test(navigator.userAgent) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+let installEvent = null;
+if ("serviceWorker" in navigator && location.protocol === "https:") {
+  navigator.serviceWorker.register("sw.js").catch(() => {});
+}
+if (!isStandalone()) $("installBtn").hidden = false;
+window.addEventListener("beforeinstallprompt", e => { e.preventDefault(); installEvent = e; $("installBtn").hidden = false; });
+window.addEventListener("appinstalled", () => { $("installBtn").hidden = true; $("howto").hidden = true; });
+$("installBtn").onclick = async () => {
+  if (installEvent) {
+    installEvent.prompt();
+    const r = await installEvent.userChoice.catch(() => null);
+    installEvent = null;
+    if (r && r.outcome === "accepted") $("installBtn").hidden = true;
+    return;
+  }
+  $("howtoText").innerHTML = isIOS
+    ? `<b>iPhoneでの追加方法</b><ol><li>Safariの画面下（または上）にある共有ボタン（四角から矢印が出ているマーク）を押す</li><li>「ホーム画面に追加」を選ぶ（見つからないときは一覧を下にスクロール）</li><li>右上の「追加」を押す</li></ol>`
+    : `<b>Androidでの追加方法</b><ol><li>Chromeの右上の「⋮」を押す</li><li>「ホーム画面に追加」または「アプリをインストール」を選ぶ</li><li>「インストール」（または「追加」）を押す</li></ol>`;
+  $("howto").hidden = false;
+};
+$("howtoClose").onclick = () => { $("howto").hidden = true; };
+
 // 読み取りの準備を先に始めておく（2回目以降はブラウザに保存されて速い）
 setTimeout(() => ensureWorker().catch(()=>{}), 500);
 </script>
