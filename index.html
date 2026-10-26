@@ -1,0 +1,521 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>大阪発 到着日チェック</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=BIZ+UDPGothic:wght@400;700&family=JetBrains+Mono:wght@500;700&display=swap">
+<script src="https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js"></script>
+<style>
+/* 1カラム：撮影 → 写真（範囲指定） → 候補 → 到着日 → 早見表 */
+:root{
+  --bg:#E9EEF2; --surface:#FFFFFF; --ink:#15212C; --muted:#5B6874; --line:#CCD5DD;
+  --accent:#0A6C8F; --accent-ink:#FFFFFF; --accent-soft:#D6EAF2;
+  --warn:#9A5B00; --warn-soft:#FBEBD2;
+  --d2:#DCEFF5; --d3:#B9DEEB; --d4:#8EC6DB; --d5:#5EA8C5; --d7:#2D7FA3; --d7ink:#FFFFFF;
+  --shade:#E6ECF1; --frame:#7C8A96;
+  --font-body:"BIZ UDPGothic","Hiragino Kaku Gothic ProN","Yu Gothic",Meiryo,sans-serif;
+  --font-num:"JetBrains Mono",ui-monospace,Menlo,Consolas,monospace;
+  color-scheme:light;
+}
+@media (prefers-color-scheme: dark){:root{
+  --bg:#0F171E; --surface:#17222B; --ink:#E6EDF2; --muted:#93A2AF; --line:#2B3946;
+  --accent:#4FB3D9; --accent-ink:#06202B; --accent-soft:#16384A;
+  --warn:#F0B35A; --warn-soft:#3A2A12;
+  --d2:#183644; --d3:#1D4A5E; --d4:#235F78; --d5:#2B7695; --d7:#4FB3D9; --d7ink:#06202B;
+  --shade:#21303B; --frame:#5A6B79;
+  color-scheme:dark}}
+*{box-sizing:border-box}
+[hidden]{display:none!important}
+html{padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--font-body);font-size:15px;line-height:1.6;
+  padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px));padding-block:18px 40px}
+.wrap{max-width:560px;margin:0 auto;display:flex;flex-direction:column;gap:16px}
+h1{font-size:21px;margin:0;letter-spacing:.02em}
+h2{font-size:15px;margin:0 0 10px}
+.sub{color:var(--muted);font-size:13px;margin:2px 0 0}
+.row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+label.cap{font-size:13px;color:var(--muted);font-weight:700;letter-spacing:.04em}
+input,select{font:inherit;color:var(--ink);background:var(--surface);border:1px solid var(--line);border-radius:8px;padding:9px 10px;min-width:0}
+:focus-visible{outline:3px solid var(--accent);outline-offset:2px}
+#shipDate{font-family:var(--font-num);font-weight:500}
+.chip{font:inherit;font-size:13px;border:1px solid var(--line);background:var(--surface);color:var(--ink);border-radius:999px;padding:6px 12px;cursor:pointer}
+.chip[aria-pressed="true"]{background:var(--accent);color:var(--accent-ink);border-color:var(--accent)}
+.chip:disabled{opacity:.5;cursor:default}
+.scan{display:grid;grid-template-columns:1fr auto;gap:10px}
+.btn{position:relative;display:flex;align-items:center;justify-content:center;gap:10px;border-radius:12px;font-weight:700;cursor:pointer;min-height:58px;padding:0 16px;font-size:17px}
+.btn input{position:absolute;inset:0;opacity:0;cursor:pointer;width:100%}
+.btn-main{background:var(--accent);color:var(--accent-ink)}
+.btn-sub{background:var(--surface);color:var(--ink);border:1px solid var(--line);font-size:14px}
+.btn svg{width:24px;height:24px;flex:none}
+.card{background:var(--surface);border:1px solid var(--line);border-radius:14px;overflow:hidden}
+.photo{padding:12px;display:flex;flex-direction:column;gap:10px;border-bottom:1px dashed var(--line)}
+#view{width:100%;height:auto;max-height:60vh;object-fit:contain;border-radius:8px;background:var(--bg);display:block}
+#view.selecting{touch-action:none;cursor:crosshair;outline:2px dashed var(--accent);outline-offset:2px}
+.status{font-size:14px;color:var(--muted);padding:12px 14px 0}
+.status b{color:var(--ink)}
+.bar{height:4px;background:var(--line);border-radius:2px;overflow:hidden;margin-top:6px}
+.bar i{display:block;height:100%;width:0;background:var(--accent);transition:width .2s}
+.cands{display:flex;flex-direction:column;gap:6px;padding:10px 14px 0}
+.cand{font:inherit;text-align:left;background:var(--bg);border:1px solid var(--line);border-radius:8px;padding:8px 10px;color:var(--ink);cursor:pointer;min-width:0;word-break:break-all}
+.cand[aria-pressed="true"]{border-color:var(--accent);box-shadow:inset 0 0 0 1px var(--accent);background:var(--accent-soft)}
+.cand small{display:block;color:var(--muted);font-size:12px}
+.fields{display:grid;grid-template-columns:1fr 1.4fr;gap:10px;padding:14px}
+.fields div{display:flex;flex-direction:column;gap:4px;min-width:0}
+.answer{padding:18px 14px 20px;background:var(--accent-soft);display:flex;flex-direction:column;gap:4px}
+.answer .lbl{font-size:13px;font-weight:700;color:var(--muted);letter-spacing:.06em}
+.big{font-family:var(--font-num);font-weight:700;font-size:44px;line-height:1.1;font-variant-numeric:tabular-nums}
+.big small{font-family:var(--font-body);font-size:22px;margin-left:4px}
+.basis{margin-top:6px;font-size:13px;background:var(--warn-soft);color:var(--warn);border-radius:8px;padding:6px 10px;align-self:flex-start;font-weight:700}
+.empty{color:var(--muted)}
+.err{color:var(--warn);font-weight:700}
+details{padding:0 14px 12px;font-size:12px;color:var(--muted)}
+details pre{white-space:pre-wrap;word-break:break-all;background:var(--bg);padding:8px;border-radius:6px;max-height:200px;overflow:auto}
+.sheet{display:flex;flex-direction:column;gap:8px}
+.grp{display:grid;grid-template-columns:96px 1fr;gap:10px;align-items:start;background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:10px 12px}
+.when{display:flex;flex-direction:column;gap:2px}
+.when .dt{font-family:var(--font-num);font-weight:700;font-size:17px;font-variant-numeric:tabular-nums}
+.tag{font-size:11px;font-weight:700;border-radius:999px;padding:1px 8px;align-self:flex-start}
+.prefs{display:flex;flex-wrap:wrap;gap:4px 10px;font-size:14px;min-width:0}
+.prefs button{font:inherit;background:none;border:0;color:var(--ink);padding:0;cursor:pointer;text-decoration:underline;text-decoration-color:var(--line);text-underline-offset:3px}
+.prefs .x{font-size:12px;color:var(--warn);width:100%}
+.foot{font-size:12px;color:var(--muted)}
+.formwrap{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:14px 12px;overflow-x:auto;display:flex;flex-direction:column;gap:14px}
+.form{display:grid;grid-template-columns:repeat(3,minmax(84px,1fr));gap:12px;align-items:start;min-width:270px}
+.fcol{display:flex;flex-direction:column;gap:10px}
+.flbl{font-size:11px;font-weight:700;color:var(--muted);margin-bottom:-6px;letter-spacing:.04em}
+.ft{border-collapse:collapse;width:100%}
+.ft td{border:1px solid var(--frame);padding:4px 4px;font-size:14px;line-height:1.3}
+.ft td.n{text-align:center;white-space:nowrap}
+.ft td.n button{font:inherit;color:inherit;background:none;border:0;padding:0;cursor:pointer;font-weight:inherit}
+.ft td.d{width:34%;text-align:center;font-family:var(--font-num);font-weight:700;font-variant-numeric:tabular-nums}
+.ft.m td{background:var(--shade);font-weight:700}
+.ft.f td{background:var(--shade)}
+.branch{min-width:270px}
+.branch td.bn{white-space:nowrap;width:22%;text-align:center}
+.branch td.ba{font-size:12px}
+.branch td.d{width:14%}
+@media (max-width:400px){.fields{grid-template-columns:1fr}.big{font-size:38px}.grp{grid-template-columns:84px 1fr}}
+@media (prefers-reduced-motion:reduce){*{transition:none!important}}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>大阪発 到着日チェック</h1>
+    <p class="sub">荷札を撮ると、届け先から到着日を出します（発送日＝1日目）</p>
+  </header>
+
+  <div class="row">
+    <label class="cap" for="shipDate">発送日</label>
+    <input type="date" id="shipDate">
+    <button class="chip" id="todayBtn" type="button">今日</button>
+  </div>
+
+  <div class="scan">
+    <label class="btn btn-main">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 8h3l2-3h6l2 3h3v11H4z"/><circle cx="12" cy="13" r="3.5"/></svg>
+      荷札を撮影
+      <input type="file" id="camInput" accept="image/*" capture="environment" aria-label="荷札を撮影">
+    </label>
+    <label class="btn btn-sub">
+      写真から
+      <input type="file" id="fileInput" accept="image/*" aria-label="写真を選ぶ">
+    </label>
+  </div>
+
+  <section class="card" aria-live="polite">
+    <div class="photo" id="photo" hidden>
+      <canvas id="view" aria-label="撮影した荷札"></canvas>
+      <div class="row">
+        <button class="chip" id="selBtn" type="button" aria-pressed="false">範囲を選ぶ</button>
+        <button class="chip" id="readSelBtn" type="button" disabled>この範囲で読む</button>
+        <button class="chip" id="rotBtn" type="button">回転</button>
+        <button class="chip" id="readAllBtn" type="button">全体を読む</button>
+      </div>
+    </div>
+    <div class="status" id="status">届け先の住所が大きく、まっすぐ写るように撮ってください。読み違えたときは、候補を選ぶか下の欄で直せます。</div>
+    <div class="cands" id="cands"></div>
+    <div class="fields">
+      <div>
+        <label class="cap" for="pref">都道府県</label>
+        <select id="pref"></select>
+      </div>
+      <div>
+        <label class="cap" for="city">市区町村</label>
+        <input id="city" placeholder="例：伊勢市、設楽郡東栄町" autocomplete="off">
+      </div>
+    </div>
+    <div class="answer" id="answer"></div>
+    <details id="rawBox" hidden><summary>読み取った文字（確認用）</summary><pre id="raw"></pre></details>
+  </section>
+
+  <section>
+    <h2 id="sheetTitle">早見表</h2>
+    <div class="sheet" id="sheet"></div>
+    <p class="foot">松阪支所エリア（三重県の伊勢市・熊野市・志摩市・松阪市・多気郡・鳥羽市・度会郡・南牟婁郡・尾鷲市・北牟婁郡）と、浜松支店エリア（愛知県の豊橋市・豊川市・新城市・田原市・設楽郡豊根村・設楽郡東栄町）は3日。</p>
+  </section>
+
+  <section>
+    <h2>日数表（大阪発）</h2>
+    <div class="formwrap">
+      <div class="form" id="form"></div>
+      <table class="ft branch" id="branch"></table>
+    </div>
+    <p class="foot">数字は発送日を1日目とした到着日数です。手書きの修正（岡山・広島・香川・徳島＝2、静岡＝3、岡山県北部の行は削除）を反映しています。県名を押すと上の欄に入ります。</p>
+  </section>
+</div>
+
+<script>
+// ===== 判定ロジック（画面に依存しない部分） PURE-START =====
+const DAYS = {
+  "北海道":7,"青森":5,"岩手":5,"秋田":5,"山形":5,"宮城":4,"福島":4,
+  "茨城":3,"栃木":3,"群馬":3,"千葉":3,"埼玉":3,"東京":3,"神奈川":3,
+  "山梨":4,"新潟":4,"長野":4,"富山":3,"石川":3,"福井":3,
+  "静岡":3,"愛知":2,"三重":2,"岐阜":2,
+  "大阪":2,"兵庫":2,"京都":2,"滋賀":2,"奈良":2,"和歌山":2,
+  "岡山":2,"広島":2,"鳥取":4,"島根":4,"山口":3,
+  "香川":2,"徳島":2,"高知":3,"愛媛":3,
+  "福岡":3,"熊本":3,"大分":3,"宮崎":3,"佐賀":3,"長崎":3,"鹿児島":3
+};
+const ORDER = ["北海道","青森","岩手","宮城","秋田","山形","福島","茨城","栃木","群馬","埼玉","千葉","東京","神奈川","新潟","富山","石川","福井","山梨","長野","岐阜","静岡","愛知","三重","滋賀","京都","大阪","兵庫","奈良","和歌山","鳥取","島根","岡山","広島","山口","徳島","香川","愛媛","高知","福岡","佐賀","長崎","熊本","大分","宮崎","鹿児島","沖縄"];
+const SPECIAL = {
+  "三重":{name:"松阪支所エリア",days:3,areas:["伊勢市","熊野市","志摩市","松阪市","多気郡","鳥羽市","度会郡","南牟婁郡","尾鷲市","北牟婁郡"],zips:["515","516","517"]},
+  "愛知":{name:"浜松支店エリア",days:3,areas:["豊橋市","豊川市","新城市","田原市","豊根村","東栄町"],zips:["440","441","442"]}
+};
+// 郵便番号の上3桁 → 都道府県（範囲）
+const ZIP = [[1,9,"北海道"],[10,18,"秋田"],[20,29,"岩手"],[30,39,"青森"],[40,99,"北海道"],[100,208,"東京"],[210,259,"神奈川"],[260,299,"千葉"],[300,319,"茨城"],[320,329,"栃木"],[330,369,"埼玉"],[370,379,"群馬"],[380,399,"長野"],[400,409,"山梨"],[410,439,"静岡"],[440,499,"愛知"],[500,509,"岐阜"],[510,519,"三重"],[520,529,"滋賀"],[530,599,"大阪"],[600,629,"京都"],[630,639,"奈良"],[640,649,"和歌山"],[650,679,"兵庫"],[680,689,"鳥取"],[690,699,"島根"],[700,719,"岡山"],[720,739,"広島"],[740,759,"山口"],[760,769,"香川"],[770,779,"徳島"],[780,789,"高知"],[790,799,"愛媛"],[800,839,"福岡"],[840,849,"佐賀"],[850,859,"長崎"],[860,869,"熊本"],[870,879,"大分"],[880,889,"宮崎"],[890,899,"鹿児島"],[900,909,"沖縄"],[910,919,"福井"],[920,929,"石川"],[930,939,"富山"],[940,959,"新潟"],[960,979,"福島"],[980,989,"宮城"],[990,999,"山形"]];
+const SUFFIX = p => p==="北海道" ? "" : p==="東京" ? "都" : (p==="大阪"||p==="京都") ? "府" : "県";
+const fullName = p => p + SUFFIX(p);
+
+function norm(s){
+  return String(s||"")
+    .replace(/[０-９]/g, c => String.fromCharCode(c.charCodeAt(0)-0xFEE0))
+    .replace(/[ー－―‐−–—]/g, "-")
+    .replace(/\s+/g, "");
+}
+function normPref(s){
+  s = String(s||"").trim();
+  if (s.startsWith("北海道")) return "北海道";
+  return s.replace(/(都|府|県)$/,"");
+}
+function prefFromZip(zip){
+  const n = parseInt(String(zip).slice(0,3), 10);
+  const hit = ZIP.find(([a,b]) => n>=a && n<=b);
+  return hit ? hit[2] : null;
+}
+// 文字列から都道府県名を探す（県・府・都つきを優先）
+function findPref(t){
+  let best = null;
+  for (const p of ORDER){
+    const i = t.indexOf(fullName(p));
+    if (i>=0 && (best===null || i<best.i)) best = {pref:p, i, end:i+fullName(p).length};
+  }
+  if (best) return best;
+  for (const p of ORDER){
+    let i = t.indexOf(p);
+    if (p==="京都" && i>0 && t[i-1]==="東") i = t.indexOf(p, i+1);
+    if (i>=0 && (best===null || i<best.i)) best = {pref:p, i, end:i+p.length};
+  }
+  return best;
+}
+function findZip(t){
+  const m = t.match(/(?:〒|T)?(\d{3})-?(\d{4})/);
+  return m ? m[1]+m[2] : null;
+}
+function cityFrom(rest){
+  rest = rest.replace(/^〒?\d{3}-?\d{4}/,"");
+  const m = rest.match(/^(.{1,5}?郡.{1,5}?[町村]|.{1,6}?市|.{1,5}?区|.{1,6}?[町村])/);
+  return m ? m[1] : "";
+}
+function lookup(pref, text, zip){
+  pref = normPref(pref);
+  if (!pref) return null;
+  const sp = SPECIAL[pref];
+  if (sp){
+    const hit = sp.areas.find(a => (text||"").includes(a));
+    if (hit) return {days:sp.days, basis:`${sp.name}（${hit}）のため ${sp.days}日`};
+    if (zip && prefFromZip(zip)===pref && sp.zips.includes(String(zip).slice(0,3)))
+      return {days:sp.days, basis:`${sp.name}（〒${String(zip).slice(0,3)}）のため ${sp.days}日`};
+  }
+  if (!(pref in DAYS)) return {days:null};
+  return {days:DAYS[pref], basis:""};
+}
+// OCRの行から届け先候補を作って、届け先らしい順に並べる
+function extractCandidates(lines){
+  const L = lines.map(l => ({t:norm(l.text), x:l.bbox.x0, y:l.bbox.y0, h:Math.max(1,l.bbox.y1-l.bbox.y0)}));
+  const hs = L.map(l=>l.h).sort((a,b)=>a-b);
+  const medH = hs.length ? hs[Math.floor(hs.length/2)] : 1;
+  const kw = [];
+  L.forEach(l => {
+    if (/(お?届け?先|お届|受取人|届先)/.test(l.t)) kw.push({type:"to", x:l.x, y:l.y});
+    if (/(依頼主|ご依頼|依頼人|差出人|発送元|送り主|荷送人)/.test(l.t)) kw.push({type:"from", x:l.x, y:l.y});
+  });
+  const used = new Set(), out = [];
+  for (let i=0; i<L.length; i++){
+    if (used.has(i)) continue;
+    const l = L[i];
+    let pf = findPref(l.t), zip = findZip(l.t), text = l.t, h = l.h;
+    const next = L[i+1];
+    if (next){
+      if (!pf){ const p2 = findPref(next.t); if (p2){ pf = p2; pf.inNext = true; } }
+      text = l.t + next.t;
+    }
+    if (!pf && !zip) continue;
+    if (pf && pf.inNext){ used.add(i+1); h = Math.max(h, next.h); }
+    const pref = pf ? pf.pref : prefFromZip(zip);
+    if (!pref) continue;
+    const src = pf ? (pf.inNext ? next.t : l.t) : l.t;
+    const after = pf ? src.slice(pf.end) + (pf.inNext ? (L[i+2]?.t||"") : (next?.t||"")) : src;
+    const city = cityFrom(after);
+    let score = h / medH + (pf ? 0.5 : 0) + (zip ? 0.3 : 0);
+    let near = null, nd = Infinity;
+    for (const k of kw){
+      if (k.y > l.y + l.h) continue;
+      const d = Math.hypot(k.x - l.x, (k.y - l.y) * 1.5);
+      if (d < nd){ nd = d; near = k; }
+    }
+    if (near) score += near.type==="to" ? 2 : -2;
+    out.push({pref, city, zip, text, score});
+  }
+  const seen = new Set();
+  return out.sort((a,b)=>b.score-a.score).filter(c => {
+    const key = c.pref + c.city + (c.zip||"");
+    if (seen.has(key)) return false; seen.add(key); return true;
+  });
+}
+// ===== PURE-END =====
+
+const WD = ["日","月","火","水","木","金","土"];
+const $ = id => document.getElementById(id);
+let current = {text:"", zip:null};
+
+function shipDate(){
+  const v = $("shipDate").value;
+  if (!v) return new Date();
+  const [y,m,d] = v.split("-").map(Number);
+  return new Date(y,m-1,d);
+}
+function addDays(n){ const d = shipDate(); d.setDate(d.getDate()+n-1); return d; }
+function fmt(d){ return `${d.getMonth()+1}/${d.getDate()}`; }
+function todayStr(){ const t=new Date(); return `${t.getFullYear()}-${String(t.getMonth()+1).padStart(2,"0")}-${String(t.getDate()).padStart(2,"0")}`; }
+function esc(s){ return String(s).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c])); }
+
+function renderAnswer(){
+  const pref = $("pref").value, city = $("city").value.trim(), box = $("answer");
+  if (!pref){ box.innerHTML = '<span class="empty">荷札を撮るか、都道府県を選ぶと到着日が出ます。</span>'; return; }
+  const r = lookup(pref, city + " " + current.text, current.zip);
+  if (!r || r.days == null){
+    box.innerHTML = `<span class="lbl">到着予定</span><span class="err">${fullName(pref)}は表にありません。営業所に確認してください。</span>`;
+    return;
+  }
+  const d = addDays(r.days);
+  box.innerHTML = `<span class="lbl">到着予定</span>
+    <div class="big">${fmt(d)}<small>（${WD[d.getDay()]}）</small></div>
+    <div>${fullName(pref)}${city ? " " + esc(city) : ""}・${r.days}日目着</div>
+    ${r.basis ? `<span class="basis">${esc(r.basis)}</span>` : ""}`;
+}
+function renderSheet(){
+  const s = shipDate();
+  $("sheetTitle").textContent = `早見表（${fmt(s)}（${WD[s.getDay()]}）発送）`;
+  const groups = {};
+  ORDER.forEach(p => { if (p in DAYS) (groups[DAYS[p]] ||= []).push(p); });
+  $("sheet").innerHTML = Object.keys(groups).map(Number).sort((a,b)=>a-b).map(n => {
+    const d = addDays(n);
+    return `<div class="grp">
+      <div class="when"><span class="dt">${fmt(d)}（${WD[d.getDay()]}）</span>
+      <span class="tag" style="background:var(--d${n});color:${n>=7?'var(--d7ink)':'var(--ink)'}">${n}日目</span></div>
+      <div class="prefs">${groups[n].map(p=>`<button type="button" data-p="${p}">${p}</button>`).join("")}${n===3?'<span class="x">＋ 三重・愛知の一部（下の注記）</span>':''}</div>
+    </div>`;
+  }).join("") + `<div class="grp"><div class="when"><span class="dt">—</span></div><div class="prefs">沖縄（表になし）</div></div>`;
+}
+// 元の紙の表と同じ並び（m＝三郷ベースの網掛け太字、f＝福岡ベースの網掛け）
+const FORM = [
+  [{label:"三郷ベース"},{g:["北海道"],t:"m"},{g:["青森","岩手","秋田","山形"],t:"m"},{g:["宮城","福島","茨城","栃木","群馬","千葉","埼玉","東京","神奈川"],t:"m"}],
+  [{g:["山梨","新潟","長野"],t:"m"},{label:"関西ベース"},{g:["富山","石川","福井"]},{g:["静岡","愛知","三重","岐阜"]},{g:["大阪","兵庫","京都","滋賀","奈良","和歌山"]}],
+  [{label:"関西ベース"},{g:["岡山","広島","鳥取","島根","山口"]},{g:["香川","徳島","高知","愛媛"]},{label:"福岡ベース"},{g:["福岡","熊本","大分","宮崎","佐賀","長崎","鹿児島"],t:"f"}]
+];
+function renderForm(){
+  $("form").innerHTML = FORM.map(col => `<div class="fcol">${col.map(b => b.label
+    ? `<div class="flbl">${b.label}</div>`
+    : `<table class="ft ${b.t||""}">${b.g.map(p => `<tr><td class="n"><button type="button" data-p="${p}">${p}</button></td><td class="d">${DAYS[p]}</td></tr>`).join("")}</table>`
+  ).join("")}</div>`).join("");
+  $("branch").innerHTML =
+    `<tr><td class="bn">松阪支所</td><td class="ba">三重県・伊勢市　熊野市　志摩市　松阪市　多気郡　鳥羽市　度会郡　南牟婁郡　尾鷲市　北牟婁郡</td><td class="d">3</td></tr>` +
+    `<tr><td class="bn">浜松支店</td><td class="ba">愛知県・豊橋市　豊川市　新城市　田原市　設楽郡豊根村　設楽郡東栄町</td><td class="d">3</td></tr>`;
+}
+function applyCandidate(c){
+  current = {text:c.text, zip:c.zip};
+  $("pref").value = ORDER.includes(c.pref) ? c.pref : "";
+  $("city").value = c.city;
+  renderAnswer();
+}
+function renderCands(list){
+  const box = $("cands");
+  if (!list.length){ box.innerHTML = ""; return; }
+  box.innerHTML = (list.length>1 ? '<span class="cap" style="font-size:12px;color:var(--muted);font-weight:700">候補（違うときは別の候補を押してください）</span>' : "") +
+    list.slice(0,4).map((c,i) => `<button type="button" class="cand" data-i="${i}" aria-pressed="${i===0}">
+      ${fullName(c.pref)} ${esc(c.city)}<small>${c.zip ? "〒"+c.zip.slice(0,3)+"-"+c.zip.slice(3)+"　" : ""}${esc(c.text.slice(0,40))}</small></button>`).join("");
+  box.querySelectorAll(".cand").forEach(b => b.onclick = () => {
+    box.querySelectorAll(".cand").forEach(x => x.setAttribute("aria-pressed", x===b));
+    applyCandidate(list[+b.dataset.i]);
+  });
+}
+function setStatus(html, prog){
+  $("status").innerHTML = html + (prog!=null ? `<div class="bar"><i style="width:${Math.round(prog*100)}%"></i></div>` : "");
+}
+
+// ===== 写真・範囲指定 =====
+let img = null, rot = 0, rotCanvas = null, sel = null, selecting = false, drag = null;
+function buildRot(){
+  const w = img.naturalWidth, h = img.naturalHeight, swap = rot % 180 !== 0;
+  const c = document.createElement("canvas");
+  c.width = swap ? h : w; c.height = swap ? w : h;
+  const x = c.getContext("2d");
+  x.translate(c.width/2, c.height/2); x.rotate(rot*Math.PI/180); x.drawImage(img, -w/2, -h/2);
+  rotCanvas = c;
+}
+function drawView(){
+  const v = $("view"), s = Math.min(1, 1200 / Math.max(rotCanvas.width, rotCanvas.height));
+  v.width = Math.round(rotCanvas.width * s); v.height = Math.round(rotCanvas.height * s);
+  const x = v.getContext("2d");
+  x.drawImage(rotCanvas, 0, 0, v.width, v.height);
+  if (sel){
+    const k = v.width / rotCanvas.width, r = {x:sel.x*k, y:sel.y*k, w:sel.w*k, h:sel.h*k};
+    x.fillStyle = "rgba(0,0,0,.45)";
+    x.fillRect(0,0,v.width,r.y); x.fillRect(0,r.y+r.h,v.width,v.height-r.y-r.h);
+    x.fillRect(0,r.y,r.x,r.h); x.fillRect(r.x+r.w,r.y,v.width-r.x-r.w,r.h);
+    x.strokeStyle = "#4FB3D9"; x.lineWidth = 3; x.strokeRect(r.x,r.y,r.w,r.h);
+  }
+}
+function toSrc(e){
+  const v = $("view"), b = v.getBoundingClientRect();
+  // 表示はobject-fit:containなので、実際の描画領域を計算
+  const ar = v.width / v.height, bw = Math.min(b.width, b.height*ar), bh = bw / ar;
+  const ox = b.left + (b.width-bw)/2, oy = b.top + (b.height-bh)/2;
+  const k = rotCanvas.width / bw;
+  return {x: Math.max(0, Math.min(rotCanvas.width, (e.clientX-ox)*k)), y: Math.max(0, Math.min(rotCanvas.height, (e.clientY-oy)*k))};
+}
+$("view").addEventListener("pointerdown", e => { if (!selecting) return; e.preventDefault(); $("view").setPointerCapture(e.pointerId); drag = toSrc(e); sel = null; });
+$("view").addEventListener("pointermove", e => {
+  if (!selecting || !drag) return;
+  const p = toSrc(e);
+  sel = {x:Math.min(drag.x,p.x), y:Math.min(drag.y,p.y), w:Math.abs(p.x-drag.x), h:Math.abs(p.y-drag.y)};
+  drawView();
+});
+$("view").addEventListener("pointerup", () => {
+  if (!drag) return; drag = null;
+  if (sel && (sel.w < 20 || sel.h < 20)) sel = null;
+  $("readSelBtn").disabled = !sel; drawView();
+});
+function setSelecting(on){
+  selecting = on;
+  $("selBtn").setAttribute("aria-pressed", on);
+  $("view").classList.toggle("selecting", on);
+}
+$("selBtn").onclick = () => { setSelecting(!selecting); if (selecting) setStatus("<b>写真の上をなぞって、お届け先の住所を囲んでください。</b>"); };
+$("readSelBtn").onclick = () => { setSelecting(false); runOCR(sel); };
+$("readAllBtn").onclick = () => { setSelecting(false); runOCR(null); };
+$("rotBtn").onclick = () => { rot = (rot+90) % 360; sel = null; $("readSelBtn").disabled = true; buildRot(); drawView(); runOCR(null); };
+
+// OCR用に切り出し・拡大・白黒化
+function prep(r){
+  const src = rotCanvas;
+  r = r || {x:0, y:0, w:src.width, h:src.height};
+  const long = Math.max(r.w, r.h);
+  let s = Math.min(1, 2400/long);
+  if (long*s < 1400) s = Math.min(3, 1400/long);
+  const c = document.createElement("canvas");
+  c.width = Math.round(r.w*s); c.height = Math.round(r.h*s);
+  const x = c.getContext("2d");
+  x.imageSmoothingQuality = "high";
+  x.drawImage(src, r.x, r.y, r.w, r.h, 0, 0, c.width, c.height);
+  const d = x.getImageData(0,0,c.width,c.height), p = d.data, hist = new Array(256).fill(0);
+  for (let i=0; i<p.length; i+=4){ const g = (p[i]*299 + p[i+1]*587 + p[i+2]*114)/1000 | 0; p[i]=g; hist[g]++; }
+  const total = p.length/4; let lo=0, hi=255, acc=0;
+  for (let g=0; g<256; g++){ acc+=hist[g]; if (acc > total*0.02){ lo=g; break; } }
+  acc=0; for (let g=255; g>=0; g--){ acc+=hist[g]; if (acc > total*0.02){ hi=g; break; } }
+  const span = Math.max(1, hi-lo);
+  for (let i=0; i<p.length; i+=4){ const v = Math.max(0, Math.min(255, (p[i]-lo)*255/span)); p[i]=p[i+1]=p[i+2]=v; }
+  x.putImageData(d,0,0);
+  return c;
+}
+
+let worker = null, workerPromise = null, busy = false, phase = "";
+function ensureWorker(){
+  if (!window.Tesseract) return Promise.reject(new Error("noLib"));
+  workerPromise ||= Tesseract.createWorker("jpn", 1, {
+    logger: m => {
+      if (!busy) return;
+      if (m.status === "recognizing text") setStatus("<b>文字を読み取り中…</b>", m.progress);
+      else if (/load/.test(m.status)) setStatus("<b>読み取りの準備中…</b>（初回だけ少し時間がかかります）", m.progress);
+    }
+  }).then(w => (worker = w));
+  return workerPromise;
+}
+async function runOCR(region){
+  if (!rotCanvas || busy) return;
+  busy = true;
+  ["selBtn","readSelBtn","rotBtn","readAllBtn"].forEach(id => $(id).disabled = true);
+  setStatus("<b>読み取りの準備中…</b>", 0);
+  try{
+    await ensureWorker();
+    const { data } = await worker.recognize(prep(region));
+    $("raw").textContent = data.text || "";
+    $("rawBox").hidden = false;
+    const list = extractCandidates(data.lines || []);
+    renderCands(list);
+    if (list.length){
+      applyCandidate(list[0]);
+      setStatus(region ? "<b>読み取りました</b>" : "<b>読み取りました</b>　違う住所を拾ったときは「範囲を選ぶ」でお届け先だけ囲んでください。");
+    } else {
+      current = {text:"", zip:null};
+      setStatus('<span class="err">住所が見つかりませんでした。</span>「範囲を選ぶ」でお届け先を囲むか、写真が横向きなら「回転」を押してください。下の欄で選ぶこともできます。');
+    }
+  }catch(e){
+    console.error(e);
+    setStatus(e && e.message==="noLib"
+      ? '<span class="err">読み取り機能を読み込めませんでした。</span>電波の良い場所で再読み込みしてください。下の欄で選ぶこともできます。'
+      : '<span class="err">読み取りに失敗しました。</span>もう一度撮るか、下の欄で選んでください。');
+  }finally{
+    busy = false;
+    ["selBtn","rotBtn","readAllBtn"].forEach(id => $(id).disabled = false);
+    $("readSelBtn").disabled = !sel;
+  }
+}
+function handleFile(file){
+  if (!file || busy) return;
+  const im = new Image();
+  im.onload = () => {
+    img = im; rot = 0; sel = null; setSelecting(false);
+    $("readSelBtn").disabled = true; $("photo").hidden = false;
+    $("cands").innerHTML = ""; $("rawBox").hidden = true;
+    buildRot(); drawView(); runOCR(null);
+  };
+  im.onerror = () => setStatus('<span class="err">この写真は開けませんでした。</span>別の写真で試してください。');
+  im.src = URL.createObjectURL(file);
+}
+
+// ===== 起動 =====
+$("pref").innerHTML = '<option value="">選んでください</option>' + ORDER.map(p=>`<option value="${p}">${p}</option>`).join("");
+$("shipDate").value = todayStr();
+$("todayBtn").onclick = () => { $("shipDate").value = todayStr(); renderSheet(); renderAnswer(); };
+$("shipDate").addEventListener("change", () => { renderSheet(); renderAnswer(); });
+$("pref").addEventListener("change", () => { current = {text:"", zip:null}; renderAnswer(); });
+$("city").addEventListener("input", () => { current = {text:"", zip:null}; renderAnswer(); });
+const pickPref = e => {
+  const b = e.target.closest("button[data-p]"); if (!b) return;
+  $("pref").value = b.dataset.p; $("city").value = ""; current = {text:"", zip:null};
+  renderAnswer(); $("pref").scrollIntoView({behavior:"smooth", block:"center"});
+};
+$("sheet").addEventListener("click", pickPref);
+$("form").addEventListener("click", pickPref);
+renderForm();
+["camInput","fileInput"].forEach(id => $(id).addEventListener("change", e => { handleFile(e.target.files[0]); e.target.value = ""; }));
+renderSheet(); renderAnswer();
+// 読み取りの準備を先に始めておく（2回目以降はブラウザに保存されて速い）
+setTimeout(() => ensureWorker().catch(()=>{}), 500);
+</script>
+</body>
+</html>
