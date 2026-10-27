@@ -23,6 +23,7 @@
   --warn:#9A5B00; --warn-soft:#FBEBD2;
   --d2:#DCEFF5; --d3:#B9DEEB; --d4:#8EC6DB; --d5:#5EA8C5; --d7:#2D7FA3; --d7ink:#FFFFFF;
   --shade:#E6ECF1; --frame:#7C8A96;
+  --bad:#B42318; --bad-ink:#FFFFFF; --bad-soft:#FDE7E4; --good:#1E7A46;
   --font-body:"BIZ UDPGothic","Hiragino Kaku Gothic ProN","Yu Gothic",Meiryo,sans-serif;
   --font-num:"JetBrains Mono",ui-monospace,Menlo,Consolas,monospace;
   color-scheme:light;
@@ -33,6 +34,7 @@
   --warn:#F0B35A; --warn-soft:#3A2A12;
   --d2:#183644; --d3:#1D4A5E; --d4:#235F78; --d5:#2B7695; --d7:#4FB3D9; --d7ink:#06202B;
   --shade:#21303B; --frame:#5A6B79;
+  --bad:#F97066; --bad-ink:#2A0905; --bad-soft:#3A1512; --good:#5FD38D;
   color-scheme:dark}}
 *{box-sizing:border-box}
 [hidden]{display:none!important}
@@ -95,6 +97,15 @@ details pre{white-space:pre-wrap;word-break:break-all;background:var(--bg);paddi
 .install svg{width:16px;height:16px}
 .howto{background:var(--accent-soft);border-radius:12px;padding:12px 14px;font-size:14px;display:flex;flex-direction:column;gap:10px;align-items:flex-start}
 .howto ol{margin:0;padding-left:1.4em}
+.duebox{padding:0 14px 14px;display:flex;flex-direction:column;gap:4px}
+.duebox input{font-family:var(--font-num);font-weight:500}
+.dnote{font-size:12px;color:var(--muted)}
+.answer.is-late{background:var(--bad-soft)}
+.late{background:var(--bad);color:var(--bad-ink);border-radius:10px;padding:12px 14px;display:flex;flex-direction:column;gap:2px;margin-bottom:8px;animation:shake .45s ease-in-out 1}
+.late b{font-size:24px;line-height:1.3}
+.late span{font-size:14px}
+.ontime{margin-top:6px;font-size:15px;font-weight:700;color:var(--good)}
+@keyframes shake{0%,100%{transform:translateX(0)}20%{transform:translateX(-6px)}40%{transform:translateX(6px)}60%{transform:translateX(-4px)}80%{transform:translateX(4px)}}
 .tblhead{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;margin-bottom:10px}
 .tblhead h2{margin:0}
 .editbar{background:var(--warn-soft);border-radius:12px;padding:12px 14px;margin-bottom:10px;display:flex;flex-direction:column;gap:10px;font-size:14px}
@@ -182,6 +193,14 @@ details pre{white-space:pre-wrap;word-break:break-all;background:var(--bg);paddi
         <input id="city" placeholder="例：伊勢市、設楽郡東栄町" autocomplete="off">
       </div>
     </div>
+    <div class="duebox">
+      <label class="cap" for="due">お届け日（荷札の指定日）</label>
+      <div class="row">
+        <input type="date" id="due">
+        <button class="chip" id="dueClear" type="button">指定なし</button>
+      </div>
+      <span class="dnote" id="dueNote">荷札にお届け日があれば、撮影したときに読み取ります。</span>
+    </div>
     <div class="answer" id="answer"></div>
     <details id="rawBox" hidden><summary>読み取った文字（確認用）</summary><pre id="raw"></pre></details>
   </section>
@@ -252,6 +271,7 @@ function norm(s){
   return String(s||"")
     .replace(/[０-９]/g, c => String.fromCharCode(c.charCodeAt(0)-0xFEE0))
     .replace(/[ー－―‐−–—]/g, "-")
+    .replace(/[／]/g, "/").replace(/[．]/g, ".")
     .replace(/\s+/g, "");
 }
 function normPref(s){
@@ -344,6 +364,41 @@ function extractCandidates(lines){
     if (seen.has(key)) return false; seen.add(key); return true;
   });
 }
+// ----- お届け日の読み取り -----
+const DUE_KW = /(お?届け?(予定|指定|希望)日|お届け日|配達(予定|指定|希望)?日|指定日)/;
+function datesIn(t){
+  const re = /(?<!\d)(?:(20\d{2})[年\/.\-]|令和(\d{1,2})年|R(\d{1,2})[.\/])?(\d{1,2})(?:月|\/|\.)(\d{1,2})(?!\d)/g;
+  const out = []; let m;
+  while ((m = re.exec(t))){
+    const y = m[1] ? +m[1] : m[2] ? 2018 + +m[2] : m[3] ? 2018 + +m[3] : null;
+    const mo = +m[4], d = +m[5];
+    if (mo>=1 && mo<=12 && d>=1 && d<=31) out.push({y, m:mo, d});
+  }
+  return out;
+}
+const startOfDay = d => new Date(d.getFullYear(), d.getMonth(), d.getDate());
+// texts: 正規化済みの行（上から順）。ship: 発送日
+function findDeliveryDate(texts, ship){
+  const s0 = startOfDay(ship);
+  const toDate = o => {
+    let dt = new Date(o.y ?? s0.getFullYear(), o.m-1, o.d);
+    if (o.y == null && dt < new Date(s0.getFullYear(), s0.getMonth(), s0.getDate()-60)) dt = new Date(s0.getFullYear()+1, o.m-1, o.d);
+    return dt;
+  };
+  for (let i=0; i<texts.length; i++){
+    const k = texts[i].match(DUE_KW);
+    if (!k) continue;
+    for (const t of [texts[i].slice(k.index + k[0].length), texts[i+1]||"", texts[i+2]||""]){
+      const ds = datesIn(t);
+      if (ds.length) return {date: toDate(ds[0]), how: "label"};
+    }
+  }
+  // 見出しが読めなかったとき：発送日の翌日〜30日後の日付が1つだけなら、それをお届け日とみなす
+  const set = new Set();
+  texts.forEach(t => datesIn(t).forEach(o => { const dt = toDate(o), diff = Math.round((dt - s0)/864e5); if (diff>=1 && diff<=30) set.add(+dt); }));
+  return set.size === 1 ? {date: new Date([...set][0]), how: "guess"} : null;
+}
+const ymd = d => d.getFullYear()*10000 + (d.getMonth()+1)*100 + d.getDate();
 // ===== PURE-END =====
 
 const WD = ["日","月","火","水","木","金","土"];
@@ -361,20 +416,64 @@ function fmt(d){ return `${d.getMonth()+1}/${d.getDate()}`; }
 function todayStr(){ const t=new Date(); return `${t.getFullYear()}-${String(t.getMonth()+1).padStart(2,"0")}-${String(t.getDate()).padStart(2,"0")}`; }
 function esc(s){ return String(s).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c])); }
 
-function renderAnswer(){
+function dueDate(){
+  const v = $("due").value;
+  if (!v) return null;
+  const [y,m,d] = v.split("-").map(Number);
+  return new Date(y, m-1, d);
+}
+const toInputDate = d => `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;
+// opts.alert：利用者の操作で判定したときだけ、間に合わなければ音を鳴らす
+function renderAnswer(opts){
   const pref = $("pref").value, city = $("city").value.trim(), box = $("answer");
+  box.classList.remove("is-late");
   if (!pref){ box.innerHTML = '<span class="empty">荷札を撮るか、都道府県を選ぶと到着日が出ます。</span>'; return; }
   const r = lookup(pref, city + " " + current.text, current.zip);
   if (!r || r.days == null){
     box.innerHTML = `<span class="lbl">到着予定</span><span class="err">${fullName(pref)}は表にありません。営業所に確認してください。</span>`;
     return;
   }
-  const d = addDays(r.days);
-  box.innerHTML = `<span class="lbl">到着予定</span>
+  const d = addDays(r.days), due = dueDate();
+  const late = !!due && ymd(d) > ymd(due);
+  const dueTxt = due ? `${fmt(due)}（${WD[due.getDay()]}）` : "";
+  box.innerHTML = `${late ? `<div class="late" role="alert"><b>YTC便で発送してください</b><span>到着予定が、お届け日 ${dueTxt} を過ぎています</span></div>` : ""}
+    <span class="lbl">到着予定</span>
     <div class="big">${fmt(d)}<small>（${WD[d.getDay()]}）</small></div>
     <div>${fullName(pref)}${city ? " " + esc(city) : ""}・${r.days}日目着</div>
-    ${r.basis ? `<span class="basis">${esc(r.basis)}</span>` : ""}`;
+    ${r.basis ? `<span class="basis">${esc(r.basis)}</span>` : ""}
+    ${due && !late ? `<div class="ontime">お届け日 ${dueTxt} に間に合います</div>` : ""}`;
+  box.classList.toggle("is-late", late);
+  if (late && opts && opts.alert) alarm();
 }
+
+// ----- 警告音 -----
+let actx = null;
+function unlockAudio(){
+  try{
+    actx ||= new (window.AudioContext || window.webkitAudioContext)();
+    if (actx.state === "suspended") actx.resume();
+  }catch{}
+}
+function alarm(){
+  try{ navigator.vibrate && navigator.vibrate([250,120,250,120,250]); }catch{}
+  if (!actx) return;
+  try{
+    const t0 = actx.currentTime + 0.02;
+    [0, 0.32, 0.64].forEach(off => {
+      const o = actx.createOscillator(), g = actx.createGain();
+      o.type = "square";
+      o.frequency.setValueAtTime(880, t0+off);
+      o.frequency.setValueAtTime(620, t0+off+0.13);
+      g.gain.setValueAtTime(0.0001, t0+off);
+      g.gain.exponentialRampToValueAtTime(0.3, t0+off+0.01);
+      g.gain.exponentialRampToValueAtTime(0.0001, t0+off+0.27);
+      o.connect(g).connect(actx.destination);
+      o.start(t0+off); o.stop(t0+off+0.29);
+    });
+  }catch{}
+}
+// スマホは操作のあとでないと音が出せないので、画面に触れたときに音の準備をしておく
+document.addEventListener("pointerdown", unlockAudio, {passive:true});
 const tagVar = n => n<=2 ? 2 : n===3 ? 3 : n===4 ? 4 : n<=6 ? 5 : 7;
 function renderSheet(){
   const s = shipDate();
@@ -530,7 +629,7 @@ function applyCandidate(c){
   current = {text:c.text, zip:c.zip};
   $("pref").value = ORDER.includes(c.pref) ? c.pref : "";
   $("city").value = c.city;
-  renderAnswer();
+  renderAnswer({alert:true});
 }
 function renderCands(list){
   const box = $("cands");
@@ -647,6 +746,16 @@ async function runOCR(region){
     $("rawBox").hidden = false;
     const list = extractCandidates(data.lines || []);
     renderCands(list);
+    const found = findDeliveryDate((data.lines || []).map(l => norm(l.text)), shipDate());
+    if (found){
+      $("due").value = toInputDate(found.date);
+      $("dueNote").textContent = found.how === "guess"
+        ? "お届け日を荷札から推定しました。違うときは直してください。"
+        : "お届け日を荷札から読み取りました。違うときは直してください。";
+    } else if (!region){
+      $("due").value = "";
+      $("dueNote").textContent = "お届け日は読み取れませんでした。指定があるときは入力してください。";
+    }
     if (list.length){
       applyCandidate(list[0]);
       setStatus(region ? "<b>読み取りました</b>" : "<b>読み取りました</b>　違う住所を拾ったときは「範囲を選ぶ」でお届け先だけ囲んでください。");
@@ -672,6 +781,7 @@ function handleFile(file){
     img = im; rot = 0; sel = null; setSelecting(false);
     $("readSelBtn").disabled = true; $("photo").hidden = false;
     $("cands").innerHTML = ""; $("rawBox").hidden = true;
+    $("due").value = ""; $("dueNote").textContent = "";
     buildRot(); drawView(); runOCR(null);
   };
   im.onerror = () => setStatus('<span class="err">この写真は開けませんでした。</span>別の写真で試してください。');
@@ -681,10 +791,13 @@ function handleFile(file){
 // ===== 起動 =====
 $("pref").innerHTML = '<option value="">選んでください</option>' + ORDER.map(p=>`<option value="${p}">${p}</option>`).join("");
 $("shipDate").value = todayStr();
-$("todayBtn").onclick = () => { $("shipDate").value = todayStr(); renderSheet(); renderAnswer(); };
-$("shipDate").addEventListener("change", () => { renderSheet(); renderAnswer(); });
-$("pref").addEventListener("change", () => { current = {text:"", zip:null}; renderAnswer(); });
+$("todayBtn").onclick = () => { $("shipDate").value = todayStr(); renderSheet(); renderAnswer({alert:true}); };
+$("shipDate").addEventListener("change", () => { renderSheet(); renderAnswer({alert:true}); });
+$("pref").addEventListener("change", () => { current = {text:"", zip:null}; renderAnswer({alert:true}); });
 $("city").addEventListener("input", () => { current = {text:"", zip:null}; renderAnswer(); });
+$("city").addEventListener("change", () => renderAnswer({alert:true}));
+$("due").addEventListener("change", () => { $("dueNote").textContent = ""; renderAnswer({alert:true}); });
+$("dueClear").onclick = () => { $("due").value = ""; $("dueNote").textContent = "お届け日の指定なしとして判定します。"; renderAnswer(); };
 const pickPref = e => {
   const b = e.target.closest("button[data-p]"); if (!b) return;
   $("pref").value = b.dataset.p; $("city").value = ""; current = {text:"", zip:null};
