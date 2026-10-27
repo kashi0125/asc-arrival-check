@@ -300,7 +300,8 @@ function findPref(t){
   return best;
 }
 function findZip(t){
-  const m = t.match(/(?:〒|T)?(\d{3})-?(\d{4})/);
+  // 「573-0093」の形か、「〒5730093」。電話番号や送り状番号の一部は拾わない
+  const m = t.match(/(?<![\d-])(\d{3})-(\d{4})(?![\d-])/) || t.match(/〒(\d{3})(\d{4})(?!\d)/);
   return m ? m[1]+m[2] : null;
 }
 function cityFrom(rest){
@@ -335,6 +336,7 @@ function extractCandidates(lines){
   for (let i=0; i<L.length; i++){
     if (used.has(i)) continue;
     const l = L[i];
+    if (/日本橋浜町|アートセッティング|ヤマトホームコンビ/.test(l.t)) continue;   // 伝票に印刷された自社（旧社名を含む）の住所は除く
     let pf = findPref(l.t), zip = findZip(l.t), text = l.t, h = l.h;
     const next = L[i+1];
     if (next){
@@ -356,7 +358,7 @@ function extractCandidates(lines){
       if (d < nd){ nd = d; near = k; }
     }
     if (near) score += near.type==="to" ? 2 : -2;
-    out.push({pref, city, zip, text, score});
+    out.push({pref, city, zip, text, score, y: (pf && pf.inNext) ? next.y : l.y, hasPref:!!pf});
   }
   const seen = new Set();
   return out.sort((a,b)=>b.score-a.score).filter(c => {
@@ -365,7 +367,7 @@ function extractCandidates(lines){
   });
 }
 // ----- お届け日の読み取り -----
-const DUE_KW = /(お?届け?(予定|指定|希望)日|お届け日|配達(予定|指定|希望)?日|指定日)/;
+const DUE_KW = /(お?届け?(予定|指定|希望)[(（]?(指定)?[)）]?日|お届け日|配達(予定|指定|希望)?日|指定[)）]?日|着日指定|必着|お届け予定)/;
 function datesIn(t){
   const re = /(?<!\d)(?:(20\d{2})[年\/.\-]|令和(\d{1,2})年|R(\d{1,2})[.\/])?(\d{1,2})(?:月|\/|\.)(\d{1,2})(?!\d)/g;
   const out = []; let m;
@@ -399,6 +401,121 @@ function findDeliveryDate(texts, ship){
   return set.size === 1 ? {date: new Date([...set][0]), how: "guess"} : null;
 }
 const ymd = d => d.getFullYear()*10000 + (d.getMonth()+1)*100 + d.getDate();
+
+// ----- 伝票の種類 -----
+// yamato：Amazon向けの印字ラベル（黒地に白字の「10/28 必着」がある方）
+// asc：オレンジ・緑の枠の複写伝票（「家財おまかせ便」。古い伝票は「らくらく家財宅急便」と書かれている）
+// 商品名ではどちらか決められないので、Amazonラベルにだけ黒で印字される文字で見分ける
+// art：「アート配達」と印字された伝票（お届け予定（指定）日の枠に大きく「11/2」）
+const TRACK_RE = /\d{3,4}-\d{4}-[\d\/]{3,4}/;
+const ASC_ROW_RE = /(?<!\d)20\d{2}(?!\d)\D{0,4}\d{1,2}\D{1,4}\d{1,2}/;   // 「2026 10 18 …」の日付の行
+function detectForm(texts, raw){
+  raw = raw || texts;
+  if (texts.some(t => /必着|amazon|Ship[I1l]D/i.test(t))) return "yamato";
+  if (texts.some(t => /アート配達/.test(t))) return "art";
+  // 「お問合せ伝票番号」（Amazonラベル・アート配達に黒で印字）がなく、日付の行がある → ASCの複写伝票
+  if (raw.some(t => ASC_ROW_RE.test(t)) && texts.some(t => TRACK_RE.test(t)) && !texts.some(t => /問合せ伝票/.test(t))) return "asc";
+  if (texts.some(t => /予定[(（]?指定[)）]?日|お客様管理/.test(t))) return "art";
+  if (texts.some(t => /問合せ伝票/.test(t))) return "yamato";
+  if (texts.some(t => TRACK_RE.test(t) || /おまかせ便|アートセッティング|宅急便/.test(t))) return "asc";
+  return null;
+}
+function isAscForm(texts){ return detectForm(texts) === "asc"; }
+// お届け先は伝票番号の行より下の最初の住所（上にある別の伝票・依頼主は除く）
+function pickBelowTracking(list, lines){
+  const tl = lines.find(l => TRACK_RE.test(norm(l.text)));
+  if (!tl) return list;
+  const below = list.filter(c => c.y > tl.bbox.y0).sort((a,b) => a.y - b.y);
+  if (!below.length) return list;
+  let top = below[0];
+  // 郵便番号だけの行のすぐ下に同じ県の住所があれば、そちら（市区町村まで分かる）を使う
+  if (!top.hasPref && below[1] && below[1].hasPref && below[1].pref === top.pref && below[1].y - top.y < (tl.bbox.y1 - tl.bbox.y0)*4){
+    top = {...below[1], zip: below[1].zip || top.zip};
+    return [top, ...list.filter(c => c !== below[1])];
+  }
+  return [top, ...list.filter(c => c !== top)];
+}
+// 月日 → 日付（発送日の前後で一番自然な年）。範囲外なら null
+function mdToDate(m, d, ship){
+  if (!(m>=1 && m<=12 && d>=1 && d<=31)) return null;
+  const s0 = startOfDay(ship);
+  let due = new Date(s0.getFullYear(), m-1, d);
+  if (due < new Date(s0.getFullYear(), s0.getMonth(), s0.getDate()-60)) due = new Date(s0.getFullYear()+1, m-1, d);
+  const diff = Math.round((due - s0)/864e5);
+  return (diff >= -30 && diff <= 60) ? due : null;
+}
+// 「10/28」の形の読み取り結果。「/」を「7」と読み違えた「10728」も扱う
+function slashDate(text, ship){
+  const t = String(text||"").replace(/\s+/g, "");
+  const cands = [];
+  const m = t.match(/(\d{1,2})\/(\d{1,2})/);
+  if (m) cands.push([+m[1], +m[2]]);
+  const d = (t.match(/\d+/g) || []).join("");
+  if (d.length === 5 && d[2] === "7") cands.push([+d.slice(0,2), +d.slice(3)]);
+  if (d.length === 4 && d[1] === "7") cands.push([+d[0], +d.slice(2)]);
+  if (d.length === 4) cands.push([+d.slice(0,2), +d.slice(2)]);
+  if (d.length === 3) cands.push([+d[0], +d.slice(1)]);
+  for (const [mo, da] of cands){ const dt = mdToDate(mo, da, ship); if (dt) return {date: dt, how: "label"}; }
+  return null;
+}
+// ヤマト伝票：「10/28 必着」が文字として読めていればそれを使う
+function findYamatoDue(texts, ship){
+  for (const t of texts){
+    const m = t.match(/(?<!\d)(\d{1,2})\/(\d{1,2})(?!\d).{0,3}(必着|着)/);
+    if (m){ const dt = mdToDate(+m[1], +m[2], ship); if (dt) return {date: dt, how: "label"}; }
+  }
+  return null;
+}
+// 住所：お届け先は伝票の上、ご依頼主は下。都道府県名まで読めた候補のうち一番上を選ぶ
+function pickAscCandidate(list){
+  const withPref = list.filter(c => c.hasPref);
+  if (!withPref.length) return list;
+  const top = withPref.reduce((a,b) => (b.y < a.y ? b : a));
+  return [top, ...list.filter(c => c !== top)];
+}
+// 日付の行「2026 10 18 10 27」（受付日の年月日 → お届け日の月日）の最後の2つをお届け日とみなす
+// rawLines：空白を残したまま全角数字を半角にした行
+function findAscDue(rawLines, ship){
+  const s0 = startOfDay(ship);
+  for (const t of rawLines){
+    const yi = t.search(/(?<!\d)20\d{2}(?!\d)/);
+    if (yi < 0) continue;
+    const yr = +t.substr(yi, 4);
+    const nums = (t.slice(yi+4).match(/\d{1,2}(?!\d)/g) || []).map(Number);
+    if (nums.length < 2) continue;
+    const m = nums[nums.length-2], d = nums[nums.length-1];
+    if (!(m>=1 && m<=12 && d>=1 && d<=31)) continue;
+    let due = new Date(yr, m-1, d);
+    if (nums.length >= 4){
+      const rm = nums[0], rd = nums[1];
+      if (rm>=1 && rm<=12 && rd>=1 && rd<=31){
+        const recv = new Date(yr, rm-1, rd);
+        if (due < recv) due = new Date(yr+1, m-1, d);   // 年をまたぐお届け
+        if (due < recv) continue;
+      }
+    }
+    const diff = Math.round((due - s0)/864e5);
+    if (diff < -30 || diff > 60) continue;
+    return {date: due, how: "label"};
+  }
+  return null;
+}
+// 数字だけを読んだ結果（例「10 27」「1027」）から月日を作る
+function monthDayFromDigits(text, ship){
+  const toks = (text.match(/\d+/g) || []);
+  let m, d;
+  if (toks.length >= 2){ m = +toks[toks.length-2]; d = +toks[toks.length-1]; }
+  else if (toks.length === 1 && toks[0].length === 4){ m = +toks[0].slice(0,2); d = +toks[0].slice(2); }
+  else if (toks.length === 1 && toks[0].length === 3){ m = +toks[0].slice(0,1); d = +toks[0].slice(1); }
+  else return null;
+  if (!(m>=1 && m<=12 && d>=1 && d<=31)) return null;
+  const s0 = startOfDay(ship);
+  let due = new Date(s0.getFullYear(), m-1, d);
+  if (due < new Date(s0.getFullYear(), s0.getMonth(), s0.getDate()-60)) due = new Date(s0.getFullYear()+1, m-1, d);
+  const diff = Math.round((due - s0)/864e5);
+  return (diff >= -30 && diff <= 60) ? {date: due, how: "label"} : null;
+}
+const halfDigits = s => String(s||"").replace(/[０-９]/g, c => String.fromCharCode(c.charCodeAt(0)-0xFEE0)).replace(/[ー－―‐−–—]/g, "-");
 // ===== PURE-END =====
 
 const WD = ["日","月","火","水","木","金","土"];
@@ -719,7 +836,263 @@ function prep(r){
   const span = Math.max(1, hi-lo);
   for (let i=0; i<p.length; i+=4){ const v = Math.max(0, Math.min(255, (p[i]-lo)*255/span)); p[i]=p[i+1]=p[i+2]=v; }
   x.putImageData(d,0,0);
+  lastPrepScale = s;
   return c;
+}
+let lastPrepScale = 1;
+
+// ASC伝票のお届け日の枠だけを切り出し、色付きの罫線・印刷文字を消して黒い字だけ残す
+// r：元画像（rotCanvas）上の範囲、charH：字の高さの目安（px）
+function inkCanvas(r, charH){
+  const f = Math.max(1, Math.min(8, INK_TARGET / Math.max(1, charH)));
+  const c = document.createElement("canvas");
+  c.width = Math.max(1, Math.round(r.w*f)); c.height = Math.max(1, Math.round(r.h*f));
+  const x = c.getContext("2d");
+  x.imageSmoothingQuality = "high";
+  x.drawImage(rotCanvas, r.x, r.y, r.w, r.h, 0, 0, c.width, c.height);
+  const img = x.getImageData(0, 0, c.width, c.height), p = img.data, W = c.width, H = c.height, n = W*H;
+  const mx = new Uint8Array(n), sat = new Uint8Array(n), hist = new Uint32Array(256);
+  for (let i=0; i<n; i++){
+    const R = p[i*4], G = p[i*4+1], B = p[i*4+2], a = Math.max(R,G,B);
+    mx[i] = a; sat[i] = a - Math.min(R,G,B); hist[a]++;
+  }
+  // 紙の明るさ（明るい方から10%）と、一番濃い字の明るさ（暗い方から1%）の間で線を引く
+  let acc = 0, paper = 255, core = 0;
+  for (let g=255; g>=0; g--){ acc += hist[g]; if (acc > n*0.10){ paper = g; break; } }
+  acc = 0; for (let g=0; g<256; g++){ acc += hist[g]; if (acc > n*0.01){ core = g; break; } }
+  const thr = core + INK_DARK*(paper - core);
+  let ink = new Uint8Array(n);
+  for (let i=0; i<n; i++) ink[i] = mx[i] < thr ? 1 : 0;
+  ink = dropSpecks(ink, W, H, Math.max(4, Math.round((INK_TARGET*0.08)**2)));
+  // 細い字を少し太らせる（横→縦の順に広げる）
+  const rad = 1, tmp = new Uint8Array(n), out = new Uint8Array(n);
+  for (let yy=0; yy<H; yy++) for (let xx=0; xx<W; xx++){
+    let v = 0; for (let k=-rad; k<=rad && !v; k++){ const q = xx+k; if (q>=0 && q<W && ink[yy*W+q]) v = 1; }
+    tmp[yy*W+xx] = v;
+  }
+  for (let yy=0; yy<H; yy++) for (let xx=0; xx<W; xx++){
+    let v = 0; for (let k=-rad; k<=rad && !v; k++){ const q = yy+k; if (q>=0 && q<H && tmp[q*W+xx]) v = 1; }
+    out[yy*W+xx] = v;
+  }
+  for (let i=0; i<n; i++){ const v = out[i] ? 0 : 255; p[i*4] = p[i*4+1] = p[i*4+2] = v; p[i*4+3] = 255; }
+  x.putImageData(img, 0, 0);
+  // 周りに白い余白を付ける（文字が端に接していると読みにくい）
+  const pad = Math.round(H*0.4), c2 = document.createElement("canvas");
+  c2.width = W + pad*2; c2.height = H + pad*2;
+  const x2 = c2.getContext("2d");
+  x2.fillStyle = "#fff"; x2.fillRect(0, 0, c2.width, c2.height); x2.drawImage(c, pad, pad);
+  return c2;
+}
+let INK_TARGET = 50, INK_DARK = 0.4;
+// 小さな点（汚れ・紙の繊維）を消す
+function dropSpecks(ink, W, H, minArea){
+  const lab = new Int32Array(W*H), out = new Uint8Array(W*H), stack = [];
+  let id = 0;
+  for (let s=0; s<W*H; s++){
+    if (!ink[s] || lab[s]) continue;
+    id++; const px = []; stack.push(s); lab[s] = id;
+    while (stack.length){
+      const q = stack.pop(); px.push(q);
+      const qx = q % W, qy = (q / W) | 0;
+      for (let dy=-1; dy<=1; dy++) for (let dx=-1; dx<=1; dx++){
+        const nx = qx+dx, ny = qy+dy;
+        if (nx<0 || ny<0 || nx>=W || ny>=H) continue;
+        const r = ny*W + nx;
+        if (ink[r] && !lab[r]){ lab[r] = id; stack.push(r); }
+      }
+    }
+    if (px.length >= minArea) for (const q of px) out[q] = 1;
+  }
+  return out;
+}
+// 送り状番号の位置から、お届け予定日の枠（右下）を割り出して数字だけ読む
+function ascDueRegion(data){
+  const w = (data.words || []).find(w => TRACK_RE.test(halfDigits(w.text)));
+  if (!w) return null;
+  const k = 1 / lastPrepScale, b = w.bbox;
+  const TW = (b.x1 - b.x0)*k, TH = (b.y1 - b.y0)*k;
+  let r = {x: b.x0*k + 1.0*TW, y: b.y0*k + 1.6*TH, w: 0.85*TW, h: 2.3*TH};
+  r.x = Math.max(0, r.x); r.y = Math.max(0, r.y);
+  r.w = Math.min(r.w, rotCanvas.width - r.x); r.h = Math.min(r.h, rotCanvas.height - r.y);
+  return (r.w > 8 && r.h > 8) ? {r, charH: TH} : null;
+}
+// ----- ヤマト伝票：黒地に白字の「10/28 必着」の箱を読む -----
+function otsu(hist, n){
+  let sum = 0; for (let i=0; i<256; i++) sum += i*hist[i];
+  let sB = 0, wB = 0, best = 0, thr = 127;
+  for (let t=0; t<256; t++){
+    wB += hist[t]; if (!wB) continue;
+    const wF = n - wB; if (!wF) break;
+    sB += t*hist[t];
+    const mB = sB/wB, mF = (sum - sB)/wF, v = wB*wF*(mB-mF)*(mB-mF);
+    if (v > best){ best = v; thr = t; }
+  }
+  return thr;
+}
+// 横・縦方向の膨張／収縮（mask：1＝対象）
+function grow1D(mask, W, H, r, horiz, dilate){
+  const out = new Uint8Array(W*H);
+  for (let y=0; y<H; y++) for (let x=0; x<W; x++){
+    let v = dilate ? 0 : 1;
+    for (let k=-r; k<=r; k++){
+      const xx = horiz ? x+k : x, yy = horiz ? y : y+k;
+      const inside = xx>=0 && yy>=0 && xx<W && yy<H;
+      const m = inside ? mask[yy*W+xx] : 0;
+      if (dilate && m){ v = 1; break; }
+      if (!dilate && !m){ v = 0; break; }
+    }
+    out[y*W+x] = v;
+  }
+  return out;
+}
+function largestBox(mask, W, H){
+  const lab = new Int32Array(W*H); let best = null, id = 0; const st = [];
+  for (let s=0; s<W*H; s++){
+    if (!mask[s] || lab[s]) continue;
+    id++; st.push(s); lab[s] = id;
+    let n = 0, x0 = W, y0 = H, x1 = 0, y1 = 0;
+    while (st.length){
+      const q = st.pop(), qx = q % W, qy = (q/W)|0; n++;
+      if (qx<x0) x0=qx; if (qx>x1) x1=qx; if (qy<y0) y0=qy; if (qy>y1) y1=qy;
+      for (const [dx,dy] of [[1,0],[-1,0],[0,1],[0,-1]]){
+        const nx = qx+dx, ny = qy+dy; if (nx<0||ny<0||nx>=W||ny>=H) continue;
+        const r = ny*W+nx; if (mask[r] && !lab[r]){ lab[r] = id; st.push(r); }
+      }
+    }
+    if (!best || n > best.n) best = {n, x0, y0, x1, y1};
+  }
+  return best;
+}
+const BOX_TARGET = 50;
+function boxCanvas(r, charH){
+  const f = Math.max(0.5, Math.min(8, BOX_TARGET / Math.max(1, charH)));
+  const c = document.createElement("canvas");
+  c.width = Math.max(1, Math.round(r.w*f)); c.height = Math.max(1, Math.round(r.h*f));
+  const x = c.getContext("2d"); x.imageSmoothingQuality = "high";
+  x.drawImage(rotCanvas, r.x, r.y, r.w, r.h, 0, 0, c.width, c.height);
+  const W = c.width, H = c.height, n = W*H, p = x.getImageData(0,0,W,H).data;
+  const g = new Uint8Array(n), hist = new Uint32Array(256);
+  for (let i=0; i<n; i++){ g[i] = (p[i*4]*299 + p[i*4+1]*587 + p[i*4+2]*114)/1000 | 0; hist[g[i]]++; }
+  const thr = otsu(hist, n);
+  const dark = new Uint8Array(n); for (let i=0; i<n; i++) dark[i] = g[i] <= thr ? 1 : 0;
+  // 白い縦すじで切れた黒い箱をつないで、一番大きい黒い塊＝箱の範囲を出す
+  const kx = Math.max(1, Math.round(BOX_TARGET*0.12)), ky = Math.max(1, Math.round(BOX_TARGET*0.05));
+  let closed = grow1D(grow1D(dark, W, H, kx, true, true), W, H, ky, false, true);
+  closed = grow1D(grow1D(closed, W, H, kx, true, false), W, H, ky, false, false);
+  const box = largestBox(closed, W, H);
+  if (!box || (box.x1-box.x0) < BOX_TARGET || (box.y1-box.y0) < BOX_TARGET*0.6) return null;
+  const BW = box.x1-box.x0+1, BH = box.y1-box.y0+1;
+  // 箱の中の白い字 → 黒い字に
+  let ink = new Uint8Array(BW*BH);
+  for (let yy=0; yy<BH; yy++) for (let xx=0; xx<BW; xx++) ink[yy*BW+xx] = dark[(box.y0+yy)*W + box.x0+xx] ? 0 : 1;
+  // 細い縦すじ（印字のかすれ）を消す：横方向に開く
+  const ks = Math.max(1, Math.round(BOX_TARGET*0.15/2));
+  ink = grow1D(grow1D(ink, BW, BH, ks, true, false), BW, BH, ks, true, true);
+  ink = dropSpecks(ink, BW, BH, Math.round((BOX_TARGET*0.1)**2));
+  const pad = Math.round(BH*0.3), o = document.createElement("canvas");
+  o.width = BW + pad*2; o.height = BH + pad*2;
+  const ox = o.getContext("2d"), od = ox.createImageData(o.width, o.height), q = od.data;
+  for (let i=0; i<q.length; i+=4){ q[i] = q[i+1] = q[i+2] = 255; q[i+3] = 255; }
+  for (let yy=0; yy<BH; yy++) for (let xx=0; xx<BW; xx++) if (ink[yy*BW+xx]){
+    const j = ((yy+pad)*o.width + xx+pad)*4; q[j] = q[j+1] = q[j+2] = 0;
+  }
+  ox.putImageData(od, 0, 0);
+  return o;
+}
+async function readYamatoDueCrop(data){
+  const w = (data.words || []).find(w => TRACK_RE.test(halfDigits(w.text)));
+  if (!w) return null;
+  const k = 1 / lastPrepScale, b = w.bbox;
+  const TW = (b.x1 - b.x0)*k, TH = (b.y1 - b.y0)*k;
+  const r = {x: Math.max(0, b.x0*k + 1.3*TW), y: Math.max(0, b.y0*k + 1.2*TH), w: 1.0*TW, h: 3.0*TH};
+  r.w = Math.min(r.w, rotCanvas.width - r.x); r.h = Math.min(r.h, rotCanvas.height - r.y);
+  if (r.w < 8 || r.h < 8) return null;
+  const c = boxCanvas(r, TH);
+  if (!c) return null;
+  phase = "<b>お届け日を読み取り中…</b>";
+  let text = "";
+  await worker.setParameters({tessedit_char_whitelist: "0123456789/", tessedit_pageseg_mode: "7"});
+  try{ text = (await worker.recognize(c)).data.text || ""; }
+  finally{ await worker.setParameters({tessedit_char_whitelist: "", tessedit_pageseg_mode: "6"}); phase = ""; }
+  return slashDate(text, shipDate());
+}
+// ----- 「アート配達」伝票：枠の中の大きな「11/2」を読む -----
+function artCanvas(r){
+  const W = Math.max(1, Math.round(r.w)), H = Math.max(1, Math.round(r.h)), n = W*H;
+  const c = document.createElement("canvas"); c.width = W; c.height = H;
+  const x = c.getContext("2d");
+  x.drawImage(rotCanvas, r.x, r.y, r.w, r.h, 0, 0, W, H);
+  const p = x.getImageData(0,0,W,H).data, g = new Uint8Array(n), hist = new Uint32Array(256);
+  for (let i=0; i<n; i++){ g[i] = (p[i*4]*299 + p[i*4+1]*587 + p[i*4+2]*114)/1000 | 0; hist[g[i]]++; }
+  const thr = otsu(hist, n);
+  let ink = new Uint8Array(n); for (let i=0; i<n; i++) ink[i] = g[i] <= thr ? 1 : 0;
+  // 枠線（長い横線・縦線）を消す
+  const rh = Math.max(1, Math.floor(W/6)), rv = Math.max(1, Math.floor(H*0.3));
+  const hl = grow1D(grow1D(ink, W, H, rh, true, false), W, H, rh, true, true);
+  const vl = grow1D(grow1D(ink, W, H, rv, false, false), W, H, rv, false, true);
+  for (let i=0; i<n; i++) if (hl[i] || vl[i]) ink[i] = 0;
+  // 大きい字（日付）だけ残す：一番背の高いかたまりの半分以上の高さのもの
+  const lab = new Int32Array(n), comps = []; const st = [];
+  for (let s=0; s<n; s++){
+    if (!ink[s] || lab[s]) continue;
+    const id = comps.length + 1, px = []; st.push(s); lab[s] = id;
+    let y0 = H, y1 = 0;
+    while (st.length){
+      const q = st.pop(), qx = q % W, qy = (q/W)|0; px.push(q);
+      if (qy<y0) y0=qy; if (qy>y1) y1=qy;
+      for (let dy=-1; dy<=1; dy++) for (let dx=-1; dx<=1; dx++){
+        const nx = qx+dx, ny = qy+dy; if (nx<0||ny<0||nx>=W||ny>=H) continue;
+        const rr = ny*W+nx; if (ink[rr] && !lab[rr]){ lab[rr] = id; st.push(rr); }
+      }
+    }
+    comps.push({px, h: y1-y0+1});
+  }
+  if (!comps.length) return null;
+  const mh = Math.max(...comps.map(c => c.h));
+  const keep = comps.filter(c => c.h >= mh*0.5 && c.px.length >= 6);
+  let bx0 = W, by0 = H, bx1 = 0, by1 = 0;
+  for (const c of keep) for (const q of c.px){ const qx = q % W, qy = (q/W)|0; if (qx<bx0) bx0=qx; if (qx>bx1) bx1=qx; if (qy<by0) by0=qy; if (qy>by1) by1=qy; }
+  if (bx1 <= bx0 || by1 <= by0) return null;
+  const BW = bx1-bx0+1, BH = by1-by0+1, f = 40 / BH, pad = Math.round(40*0.4);
+  const o = document.createElement("canvas");
+  o.width = Math.round(BW*f) + pad*2; o.height = 40 + pad*2;
+  const ox = o.getContext("2d"), od = ox.createImageData(o.width, o.height), q = od.data;
+  for (let i=0; i<q.length; i+=4){ q[i] = q[i+1] = q[i+2] = 255; q[i+3] = 255; }
+  const mask = new Uint8Array(n); for (const c of keep) for (const v of c.px) mask[v] = 1;
+  for (let yy=0; yy<o.height-pad*2; yy++) for (let xx=0; xx<o.width-pad*2; xx++){
+    const sx = bx0 + Math.min(BW-1, Math.floor(xx/f)), sy = by0 + Math.min(BH-1, Math.floor(yy/f));
+    if (mask[sy*W+sx]){ const j = ((yy+pad)*o.width + xx+pad)*4; q[j] = q[j+1] = q[j+2] = 0; }
+  }
+  ox.putImageData(od, 0, 0);
+  return o;
+}
+async function readArtDueCrop(data){
+  const w = (data.words || []).find(w => TRACK_RE.test(halfDigits(w.text)));
+  if (!w) return null;
+  const k = 1 / lastPrepScale, b = w.bbox;
+  const TW = (b.x1 - b.x0)*k, TH = (b.y1 - b.y0)*k;
+  const r = {x: Math.max(0, b.x0*k + 1.5*TW), y: Math.max(0, b.y0*k + 0.5*TH), w: 0.9*TW, h: 2.7*TH};
+  r.w = Math.min(r.w, rotCanvas.width - r.x); r.h = Math.min(r.h, rotCanvas.height - r.y);
+  if (r.w < 8 || r.h < 8) return null;
+  const c = artCanvas(r);
+  if (!c) return null;
+  phase = "<b>お届け日を読み取り中…</b>";
+  let text = "";
+  await worker.setParameters({tessedit_char_whitelist: "0123456789/", tessedit_pageseg_mode: "7"});
+  try{ text = (await worker.recognize(c)).data.text || ""; }
+  finally{ await worker.setParameters({tessedit_char_whitelist: "", tessedit_pageseg_mode: "6"}); phase = ""; }
+  return slashDate(text, shipDate());
+}
+async function readAscDueCrop(data){
+  const reg = ascDueRegion(data);
+  if (!reg) return null;
+  const c = inkCanvas(reg.r, reg.charH);
+  phase = "<b>お届け日を読み取り中…</b>";
+  let text = "";
+  await worker.setParameters({tessedit_char_whitelist: "0123456789", tessedit_pageseg_mode: "7"});
+  try{ text = (await worker.recognize(c)).data.text || ""; }
+  finally{ await worker.setParameters({tessedit_char_whitelist: "", tessedit_pageseg_mode: "6"}); phase = ""; }
+  return monthDayFromDigits(text, shipDate());
 }
 
 let worker = null, workerPromise = null, busy = false, phase = "";
@@ -728,25 +1101,61 @@ function ensureWorker(){
   workerPromise ||= Tesseract.createWorker("jpn", 1, {
     logger: m => {
       if (!busy) return;
-      if (m.status === "recognizing text") setStatus("<b>文字を読み取り中…</b>", m.progress);
+      if (m.status === "recognizing text") setStatus(phase || "<b>文字を読み取り中…</b>", m.progress);
       else if (/load/.test(m.status)) setStatus("<b>読み取りの準備中…</b>（初回だけ少し時間がかかります）", m.progress);
     }
   }).then(w => (worker = w));
   return workerPromise;
 }
-async function runOCR(region){
+// auto=true（新しく撮った写真）のときは、住所が見つからなければ 90°→270°→180° と回して読み直す
+const AUTO_ROT = [0, 90, 270, 180];
+async function runOCR(region, auto){
   if (!rotCanvas || busy) return;
   busy = true;
   ["selBtn","readSelBtn","rotBtn","readAllBtn"].forEach(id => $(id).disabled = true);
   setStatus("<b>読み取りの準備中…</b>", 0);
   try{
     await ensureWorker();
-    const { data } = await worker.recognize(prep(region));
+    let data = null, firstData = null;
+    const startRot = rot;
+    const tries = auto && !region ? AUTO_ROT : [0];
+    for (let i = 0; i < tries.length; i++){
+      if (i > 0){
+        rot = (startRot + tries[i]) % 360;
+        buildRot(); drawView();
+        phase = `<b>向きを変えて読み直しています…</b>（${i+1}/${tries.length}）`;
+      } else phase = "";
+      const res = await worker.recognize(prep(region));
+      firstData ||= res.data;
+      if (extractCandidates(res.data.lines || []).length){ data = res.data; break; }
+    }
+    if (!data){
+      // どの向きでも見つからなかった：最初の向きに戻す
+      if (rot !== startRot){ rot = startRot; buildRot(); drawView(); }
+      data = firstData;
+    }
+    phase = "";
     $("raw").textContent = data.text || "";
     $("rawBox").hidden = false;
-    const list = extractCandidates(data.lines || []);
+    const lines = data.lines || [];
+    const texts = lines.map(l => norm(l.text)), raw = lines.map(l => halfDigits(l.text));
+    const form = detectForm(texts, raw);
+    let list = extractCandidates(lines);
+    if (form === "asc") list = pickAscCandidate(list);
+    else if (form === "yamato" || form === "art") list = pickBelowTracking(list, lines);
     renderCands(list);
-    const found = findDeliveryDate((data.lines || []).map(l => norm(l.text)), shipDate());
+    // お届け日：伝票ごとの読み方 → 枠の切り出し → 一般的な読み方 の順に試す
+    let found = null;
+    if (form === "asc"){
+      found = findAscDue(raw, shipDate());
+      if (!found && !region){ try{ found = await readAscDueCrop(data); }catch(e){ console.error(e); } }
+    } else if (form === "yamato"){
+      found = findYamatoDue(texts, shipDate());
+      if (!found && !region){ try{ found = await readYamatoDueCrop(data); }catch(e){ console.error(e); } }
+    } else if (form === "art" && !region){
+      try{ found = await readArtDueCrop(data); }catch(e){ console.error(e); }
+    }
+    found ||= findDeliveryDate(texts, shipDate());
     if (found){
       $("due").value = toInputDate(found.date);
       $("dueNote").textContent = found.how === "guess"
@@ -761,7 +1170,9 @@ async function runOCR(region){
       setStatus(region ? "<b>読み取りました</b>" : "<b>読み取りました</b>　違う住所を拾ったときは「範囲を選ぶ」でお届け先だけ囲んでください。");
     } else {
       current = {text:"", zip:null};
-      setStatus('<span class="err">住所が見つかりませんでした。</span>「範囲を選ぶ」でお届け先を囲むか、写真が横向きなら「回転」を押してください。下の欄で選ぶこともできます。');
+      setStatus(auto
+        ? '<span class="err">住所が見つかりませんでした。</span>荷札の辺を画面の辺にそろえて撮り直すか、「範囲を選ぶ」でお届け先を囲んでください。下の欄で選ぶこともできます。'
+        : '<span class="err">住所が見つかりませんでした。</span>「範囲を選ぶ」でお届け先を囲むか、「回転」を押してください。下の欄で選ぶこともできます。');
     }
   }catch(e){
     console.error(e);
@@ -769,7 +1180,7 @@ async function runOCR(region){
       ? '<span class="err">読み取り機能を読み込めませんでした。</span>電波の良い場所で再読み込みしてください。下の欄で選ぶこともできます。'
       : '<span class="err">読み取りに失敗しました。</span>もう一度撮るか、下の欄で選んでください。');
   }finally{
-    busy = false;
+    busy = false; phase = "";
     ["selBtn","rotBtn","readAllBtn"].forEach(id => $(id).disabled = false);
     $("readSelBtn").disabled = !sel;
   }
@@ -782,7 +1193,7 @@ function handleFile(file){
     $("readSelBtn").disabled = true; $("photo").hidden = false;
     $("cands").innerHTML = ""; $("rawBox").hidden = true;
     $("due").value = ""; $("dueNote").textContent = "";
-    buildRot(); drawView(); runOCR(null);
+    buildRot(); drawView(); runOCR(null, true);
   };
   im.onerror = () => setStatus('<span class="err">この写真は開けませんでした。</span>別の写真で試してください。');
   im.src = URL.createObjectURL(file);
