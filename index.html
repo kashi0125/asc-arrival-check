@@ -95,6 +95,17 @@ details pre{white-space:pre-wrap;word-break:break-all;background:var(--bg);paddi
 .install svg{width:16px;height:16px}
 .howto{background:var(--accent-soft);border-radius:12px;padding:12px 14px;font-size:14px;display:flex;flex-direction:column;gap:10px;align-items:flex-start}
 .howto ol{margin:0;padding-left:1.4em}
+.tblhead{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;margin-bottom:10px}
+.tblhead h2{margin:0}
+.editbar{background:var(--warn-soft);border-radius:12px;padding:12px 14px;margin-bottom:10px;display:flex;flex-direction:column;gap:10px;font-size:14px}
+.chip.primary{background:var(--accent);color:var(--accent-ink);border-color:var(--accent);font-weight:700}
+.confirm{background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:10px 12px;display:flex;flex-direction:column;gap:8px}
+.confirm ul,.history ul{margin:0;padding-left:1.3em}
+.dsel{font-family:var(--font-num);font-weight:700;padding:2px 4px;border-radius:6px;width:100%;max-width:64px;text-align:center}
+.ft td.chg{background:var(--warn-soft)!important;color:var(--warn)}
+.history{font-size:13px;color:var(--muted);margin-top:6px}
+.history summary{cursor:pointer}
+.history li{margin-top:4px}
 .formwrap{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:14px 12px;overflow-x:auto;display:flex;flex-direction:column;gap:14px}
 .form{display:grid;grid-template-columns:repeat(3,minmax(84px,1fr));gap:12px;align-items:start;min-width:270px}
 .fcol{display:flex;flex-direction:column;gap:10px}
@@ -178,19 +189,43 @@ details pre{white-space:pre-wrap;word-break:break-all;background:var(--bg);paddi
   <section>
     <h2 id="sheetTitle">早見表</h2>
     <div class="sheet" id="sheet"></div>
-    <p class="foot">松阪支所エリア（三重県の伊勢市・熊野市・志摩市・松阪市・多気郡・鳥羽市・度会郡・南牟婁郡・尾鷲市・北牟婁郡）と、浜松支店エリア（愛知県の豊橋市・豊川市・新城市・田原市・設楽郡豊根村・設楽郡東栄町）は3日。</p>
+    <p class="foot" id="sheetFoot"></p>
   </section>
 
   <section>
-    <h2>日数表（大阪発）</h2>
+    <div class="tblhead">
+      <h2>日数表（大阪発）</h2>
+      <button class="chip" id="editBtn" type="button" hidden>数字を変更する</button>
+    </div>
+    <div class="editbar" id="editBar" hidden>
+      <div><b>変更モード</b>　変えたい数字を選んでから「保存」を押してください。保存すると全員のアプリに反映されます。</div>
+      <div class="row">
+        <label class="cap" for="editName">変更した人</label>
+        <input id="editName" maxlength="20" placeholder="名前（任意）" autocomplete="off">
+      </div>
+      <div class="row">
+        <button class="chip primary" id="saveBtn" type="button">保存</button>
+        <button class="chip" id="cancelBtn" type="button">やめる</button>
+        <button class="chip" id="resetBtn" type="button">最初の表の数字に戻す</button>
+      </div>
+      <div class="confirm" id="confirmBox" hidden></div>
+    </div>
     <div class="formwrap">
       <div class="form" id="form"></div>
       <table class="ft branch" id="branch"></table>
     </div>
     <p class="foot">数字は発送日を1日目とした到着日数です。県名を押すと上の欄に入ります。</p>
+    <p class="foot" id="syncInfo"></p>
+    <details class="history" id="historyBox" hidden>
+      <summary>変更の履歴</summary>
+      <ul id="historyList"></ul>
+    </details>
   </section>
 </div>
 
+<script src="firebase-config.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore-compat.js"></script>
 <script>
 // ===== 判定ロジック（画面に依存しない部分） PURE-START =====
 const DAYS = {
@@ -340,19 +375,24 @@ function renderAnswer(){
     <div>${fullName(pref)}${city ? " " + esc(city) : ""}・${r.days}日目着</div>
     ${r.basis ? `<span class="basis">${esc(r.basis)}</span>` : ""}`;
 }
+const tagVar = n => n<=2 ? 2 : n===3 ? 3 : n===4 ? 4 : n<=6 ? 5 : 7;
 function renderSheet(){
   const s = shipDate();
   $("sheetTitle").textContent = `早見表（${fmt(s)}（${WD[s.getDay()]}）発送）`;
   const groups = {};
   ORDER.forEach(p => { if (p in DAYS) (groups[DAYS[p]] ||= []).push(p); });
+  Object.keys(SPECIAL).forEach(k => { groups[SPECIAL[k].days] ||= []; });
   $("sheet").innerHTML = Object.keys(groups).map(Number).sort((a,b)=>a-b).map(n => {
-    const d = addDays(n);
+    const d = addDays(n), v = tagVar(n);
+    const sp = Object.keys(SPECIAL).filter(k => SPECIAL[k].days === n).map(k => k);
     return `<div class="grp">
       <div class="when"><span class="dt">${fmt(d)}（${WD[d.getDay()]}）</span>
-      <span class="tag" style="background:var(--d${n});color:${n>=7?'var(--d7ink)':'var(--ink)'}">${n}日目</span></div>
-      <div class="prefs">${groups[n].map(p=>`<button type="button" data-p="${p}">${p}</button>`).join("")}${n===3?'<span class="x">＋ 三重・愛知の一部（下の注記）</span>':''}</div>
+      <span class="tag" style="background:var(--d${v});color:${v>=7?'var(--d7ink)':'var(--ink)'}">${n}日目</span></div>
+      <div class="prefs">${groups[n].map(p=>`<button type="button" data-p="${p}">${p}</button>`).join("")}${sp.length?`<span class="x">＋ ${sp.join("・")}の一部（下の注記）</span>`:''}</div>
     </div>`;
   }).join("") + `<div class="grp"><div class="when"><span class="dt">—</span></div><div class="prefs">沖縄（表になし）</div></div>`;
+  const m = SPECIAL["三重"], a = SPECIAL["愛知"];
+  $("sheetFoot").textContent = `松阪支所エリア（三重県の伊勢市・熊野市・志摩市・松阪市・多気郡・鳥羽市・度会郡・南牟婁郡・尾鷲市・北牟婁郡）は${m.days}日、浜松支店エリア（愛知県の豊橋市・豊川市・新城市・田原市・設楽郡豊根村・設楽郡東栄町）は${a.days}日。`;
 }
 // 元の紙の表と同じ並び（m＝三郷ベースの網掛け太字、f＝福岡ベースの網掛け）
 const FORM = [
@@ -360,14 +400,131 @@ const FORM = [
   [{g:["山梨","新潟","長野"],t:"m"},{label:"関西ベース"},{g:["富山","石川","福井"]},{g:["静岡","愛知","三重","岐阜"]},{g:["大阪","兵庫","京都","滋賀","奈良","和歌山"]}],
   [{label:"関西ベース"},{g:["岡山","広島","鳥取","島根","山口"]},{g:["香川","徳島","高知","愛媛"]},{label:"福岡ベース"},{g:["福岡","熊本","大分","宮崎","佐賀","長崎","鹿児島"],t:"f"}]
 ];
+// ===== 日数の変更（全員で共有） =====
+const MAXD = 10;
+const DEFAULT_DAYS = {...DAYS};
+const DEFAULT_SPECIAL = {"三重":3,"愛知":3};
+const SP_LABEL = {"三重":"松阪支所エリア","愛知":"浜松支店エリア"};
+let editing = false, draft = null;   // draft = {days:{...}, special:{...}}
+const snapshot = () => ({days:{...DAYS}, special:{"三重":SPECIAL["三重"].days, "愛知":SPECIAL["愛知"].days}});
+const okDay = v => Number.isInteger(v) && v>=1 && v<=MAXD;
+
+function dayCell(key, val, isSp){
+  if (!editing) return `<td class="d">${val}</td>`;
+  const cur = isSp ? SPECIAL[key].days : DAYS[key];
+  const opts = Array.from({length:MAXD}, (_,i)=>i+1).map(n => `<option value="${n}"${n===val?" selected":""}>${n}</option>`).join("");
+  const label = isSp ? SP_LABEL[key] : key;
+  return `<td class="d${val!==cur?" chg":""}"><select class="dsel" data-${isSp?"sp":"k"}="${key}" aria-label="${label}の日数">${opts}</select></td>`;
+}
 function renderForm(){
+  const D = editing ? draft.days : DAYS;
+  const S = editing ? draft.special : {"三重":SPECIAL["三重"].days, "愛知":SPECIAL["愛知"].days};
   $("form").innerHTML = FORM.map(col => `<div class="fcol">${col.map(b => b.label
     ? `<div class="flbl">${b.label}</div>`
-    : `<table class="ft ${b.t||""}">${b.g.map(p => `<tr><td class="n"><button type="button" data-p="${p}">${p}</button></td><td class="d">${DAYS[p]}</td></tr>`).join("")}</table>`
+    : `<table class="ft ${b.t||""}">${b.g.map(p => `<tr><td class="n">${editing ? p : `<button type="button" data-p="${p}">${p}</button>`}</td>${dayCell(p, D[p], false)}</tr>`).join("")}</table>`
   ).join("")}</div>`).join("");
   $("branch").innerHTML =
-    `<tr><td class="bn">松阪支所</td><td class="ba">三重県・伊勢市　熊野市　志摩市　松阪市　多気郡　鳥羽市　度会郡　南牟婁郡　尾鷲市　北牟婁郡</td><td class="d">3</td></tr>` +
-    `<tr><td class="bn">浜松支店</td><td class="ba">愛知県・豊橋市　豊川市　新城市　田原市　設楽郡豊根村　設楽郡東栄町</td><td class="d">3</td></tr>`;
+    `<tr><td class="bn">松阪支所</td><td class="ba">三重県・伊勢市　熊野市　志摩市　松阪市　多気郡　鳥羽市　度会郡　南牟婁郡　尾鷲市　北牟婁郡</td>${dayCell("三重", S["三重"], true)}</tr>` +
+    `<tr><td class="bn">浜松支店</td><td class="ba">愛知県・豊橋市　豊川市　新城市　田原市　設楽郡豊根村　設楽郡東栄町</td>${dayCell("愛知", S["愛知"], true)}</tr>`;
+}
+function renderAll(){ renderForm(); renderSheet(); renderAnswer(); }
+
+// 保存されている日数をアプリに反映（おかしな値は無視）
+function applyData(data){
+  if (!data) return;
+  const d = data.days || {}, s = data.special || {};
+  Object.keys(DEFAULT_DAYS).forEach(p => { DAYS[p] = okDay(d[p]) ? d[p] : DEFAULT_DAYS[p]; });
+  Object.keys(DEFAULT_SPECIAL).forEach(k => { SPECIAL[k].days = okDay(s[k]) ? s[k] : DEFAULT_SPECIAL[k]; });
+}
+const CACHE_KEY = "arrival-days-v1";
+function saveLocal(data){ try{ localStorage.setItem(CACHE_KEY, JSON.stringify(data)); }catch{} }
+function loadLocal(){ try{ return JSON.parse(localStorage.getItem(CACHE_KEY) || "null"); }catch{ return null; } }
+
+function diffList(from, to){
+  const out = [];
+  Object.keys(DEFAULT_DAYS).forEach(p => { if (from.days[p] !== to.days[p]) out.push({name:p, from:from.days[p], to:to.days[p]}); });
+  Object.keys(DEFAULT_SPECIAL).forEach(k => { if (from.special[k] !== to.special[k]) out.push({name:SP_LABEL[k], from:from.special[k], to:to.special[k]}); });
+  return out;
+}
+function fmtTime(ts){
+  const d = ts && ts.toDate ? ts.toDate() : (ts ? new Date(ts) : null);
+  if (!d || isNaN(d)) return "";
+  return `${d.getMonth()+1}/${d.getDate()} ${String(d.getHours()).padStart(2,"0")}:${String(d.getMinutes()).padStart(2,"0")}`;
+}
+
+let db = null, lastMeta = null;
+function setSyncInfo(){
+  if (!db){ $("syncInfo").textContent = ""; return; }
+  $("syncInfo").textContent = lastMeta && lastMeta.updatedAt
+    ? `最終変更：${fmtTime(lastMeta.updatedAt)}${lastMeta.updatedBy ? "（" + lastMeta.updatedBy + "）" : ""}`
+    : "";
+}
+function startEdit(){
+  editing = true; draft = snapshot();
+  $("editBar").hidden = false; $("editBtn").hidden = true; $("confirmBox").hidden = true;
+  try{ $("editName").value = localStorage.getItem("arrival-editor") || ""; }catch{}
+  renderForm();
+}
+function endEdit(){
+  editing = false; draft = null;
+  $("editBar").hidden = true; $("editBtn").hidden = !db; $("confirmBox").hidden = true;
+  renderForm();
+}
+function showConfirm(){
+  const changes = diffList(snapshot(), draft);
+  const box = $("confirmBox");
+  box.hidden = false;
+  if (!changes.length){ box.innerHTML = "変更された数字はありません。"; return; }
+  box.innerHTML = `<b>次の内容で保存します。全員のアプリに反映されます。</b>
+    <ul>${changes.map(c => `<li>${esc(c.name)}：${c.from} → <b>${c.to}</b></li>`).join("")}</ul>
+    <div class="row"><button class="chip primary" id="doSave" type="button">この内容で保存</button><button class="chip" id="backEdit" type="button">戻る</button></div>`;
+  $("doSave").onclick = () => doSave(changes);
+  $("backEdit").onclick = () => { box.hidden = true; };
+}
+async function doSave(changes){
+  const by = $("editName").value.trim().slice(0,20);
+  try{ localStorage.setItem("arrival-editor", by); }catch{}
+  const box = $("confirmBox");
+  box.innerHTML = "<b>保存中…</b>";
+  const ts = firebase.firestore.FieldValue.serverTimestamp();
+  const data = {days:{...draft.days}, special:{...draft.special}, updatedAt:ts, updatedBy:by};
+  const batch = db.batch();
+  batch.set(db.collection("config").doc("days"), data);
+  batch.set(db.collection("history").doc(), {changes, by, at:ts});
+  const slow = setTimeout(() => { box.innerHTML = "<b>電波が弱いため保存を待っています…</b>　電波が戻ると自動で保存されます。"; }, 6000);
+  try{
+    await batch.commit();
+    clearTimeout(slow);
+    endEdit();
+    $("syncInfo").textContent = "保存しました。全員のアプリに反映されます。";
+  }catch(e){
+    clearTimeout(slow);
+    console.error(e);
+    box.innerHTML = `<span class="err">保存できませんでした。</span>電波の良い場所でもう一度「保存」を押してください。`;
+  }
+}
+function connectFirebase(){
+  const cfg = window.FIREBASE_CONFIG;
+  if (!cfg || !window.firebase) return;
+  try{
+    firebase.initializeApp(cfg);
+    db = firebase.firestore();
+  }catch(e){ console.error(e); db = null; return; }
+  $("editBtn").hidden = false;
+  db.collection("config").doc("days").onSnapshot(doc => {
+    const data = doc.exists ? doc.data() : null;
+    lastMeta = data ? {updatedAt:data.updatedAt, updatedBy:data.updatedBy} : null;
+    if (data){ applyData(data); saveLocal({days:data.days, special:data.special}); }
+    else { applyData({days:DEFAULT_DAYS, special:DEFAULT_SPECIAL}); }
+    if (!editing) renderAll(); else { renderSheet(); renderAnswer(); }
+    setSyncInfo();
+  }, e => console.error(e));
+  db.collection("history").orderBy("at","desc").limit(20).onSnapshot(qs => {
+    const items = qs.docs.map(d => d.data()).filter(h => Array.isArray(h.changes));
+    $("historyBox").hidden = !items.length;
+    $("historyList").innerHTML = items.map(h =>
+      `<li>${fmtTime(h.at)}${h.by ? "（" + esc(h.by) + "）" : ""}：${h.changes.map(c => `${esc(c.name)} ${Number(c.from)}→${Number(c.to)}`).join("、")}</li>`).join("");
+  }, e => console.error(e));
 }
 function applyCandidate(c){
   current = {text:c.text, zip:c.zip};
@@ -535,7 +692,25 @@ const pickPref = e => {
 };
 $("sheet").addEventListener("click", pickPref);
 $("form").addEventListener("click", pickPref);
+const onDraftChange = e => {
+  const s = e.target;
+  if (!editing || !s.classList.contains("dsel")) return;
+  const v = Number(s.value);
+  if (s.dataset.k) draft.days[s.dataset.k] = v; else if (s.dataset.sp) draft.special[s.dataset.sp] = v;
+  $("confirmBox").hidden = true;
+  renderForm();
+  const again = document.querySelector(`.dsel[data-${s.dataset.k?"k":"sp"}="${s.dataset.k||s.dataset.sp}"]`);
+  if (again) again.focus();
+};
+$("form").addEventListener("change", onDraftChange);
+$("branch").addEventListener("change", onDraftChange);
+$("editBtn").onclick = startEdit;
+$("cancelBtn").onclick = endEdit;
+$("saveBtn").onclick = showConfirm;
+$("resetBtn").onclick = () => { draft = {days:{...DEFAULT_DAYS}, special:{...DEFAULT_SPECIAL}}; $("confirmBox").hidden = true; renderForm(); };
+applyData(loadLocal());   // 前回受け取った日数（電波がなくても最新の表で動く）
 renderForm();
+connectFirebase();
 ["camInput","fileInput"].forEach(id => $(id).addEventListener("change", e => { handleFile(e.target.files[0]); e.target.value = ""; }));
 renderSheet(); renderAnswer();
 // ===== ホーム画面に追加 =====

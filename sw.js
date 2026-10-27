@@ -1,7 +1,7 @@
 // 大阪発 到着日チェック：ホーム画面アプリ用
 // 新しい版を先に取りに行き（アップロードした更新がすぐ反映される）、電波がないときは保存済みの版を使う
-const CACHE = "arrival-check-v1";
-const FILES = ["./", "./index.html", "./manifest.webmanifest", "./icon-192.png", "./icon-512.png", "./apple-touch-icon.png"];
+const CACHE = "arrival-check-v2";
+const FILES = ["./", "./index.html", "./firebase-config.js", "./manifest.webmanifest", "./icon-192.png", "./icon-512.png", "./apple-touch-icon.png"];
 
 self.addEventListener("install", e => {
   e.waitUntil(caches.open(CACHE).then(c => c.addAll(FILES)));
